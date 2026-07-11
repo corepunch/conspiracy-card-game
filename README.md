@@ -12,7 +12,7 @@ The prototype is designed for static hosting and has no build step. Once GitHub 
 
 `https://<username>.github.io/<repository>/`
 
-For local development, double-click `serve.command` and open [http://localhost:8080](http://localhost:8080), or run:
+For local development, double-click `serve.command` and open the address it prints. It starts at `http://localhost:8080` and automatically chooses the next available port if 8080 is already occupied. Alternatively, run:
 
 ```sh
 python3 -m http.server 8080

@@ -49,16 +49,46 @@
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.58);
-  const cardGeometry = new THREE.PlaneGeometry(1.56, 2.18);
+  const cardGeometry = makeRoundedCardGeometry(1.56, 2.18, .075);
+  const flatCardQuaternion = new THREE.Quaternion();
+  const billboardTarget = new THREE.Object3D();
+  const targetQuaternion = new THREE.Quaternion();
+  const cameraDirection = new THREE.Vector3();
+  const zoomTarget = new THREE.Vector3();
   const hand = [];
   const battlefield = [];
   let deck = [];
   let dragging = null;
   let hovered = null;
+  let cardZoom = 0;
   let table, deckTop;
 
   const textureLoader = new THREE.TextureLoader();
   const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
+
+  function makeRoundedCardGeometry(width, height, radius) {
+    const halfWidth = width / 2;
+    const halfHeight = height / 2;
+    const shape = new THREE.Shape();
+    shape.moveTo(-halfWidth + radius, -halfHeight);
+    shape.lineTo(halfWidth - radius, -halfHeight);
+    shape.quadraticCurveTo(halfWidth, -halfHeight, halfWidth, -halfHeight + radius);
+    shape.lineTo(halfWidth, halfHeight - radius);
+    shape.quadraticCurveTo(halfWidth, halfHeight, halfWidth - radius, halfHeight);
+    shape.lineTo(-halfWidth + radius, halfHeight);
+    shape.quadraticCurveTo(-halfWidth, halfHeight, -halfWidth, halfHeight - radius);
+    shape.lineTo(-halfWidth, -halfHeight + radius);
+    shape.quadraticCurveTo(-halfWidth, -halfHeight, -halfWidth + radius, -halfHeight);
+
+    const geometry = new THREE.ShapeGeometry(shape, 5);
+    const positions = geometry.attributes.position;
+    const uvs = geometry.attributes.uv;
+    for (let i = 0; i < positions.count; i++) {
+      uvs.setXY(i, positions.getX(i) / width + .5, positions.getY(i) / height + .5);
+    }
+    uvs.needsUpdate = true;
+    return geometry;
+  }
 
   function canvasTexture(canvas) {
     const tex = new THREE.CanvasTexture(canvas);
@@ -139,7 +169,7 @@
     const spacing = Math.min(1.18, 7.1 / Math.max(count - 1, 1));
     hand.forEach((card, i) => {
       const offset = i - (count - 1) / 2;
-      card.userData.target.set(offset * spacing, .16 + Math.abs(offset) * .012, 4.12 + Math.abs(offset) * .08);
+      card.userData.target.set(offset * spacing, .14 + i * .009, 4.12 + Math.abs(offset) * .08);
       card.userData.targetRot = -offset * .045;
       card.userData.zone = 'hand';
       card.renderOrder = i;
@@ -151,7 +181,7 @@
       const cols = Math.min(5, battlefield.length);
       const row = Math.floor(i / cols), col = i % cols;
       const rowCount = Math.min(cols, battlefield.length - row * cols);
-      card.userData.target.set((col - (rowCount - 1) / 2) * 1.82 - .35, .08, -1.4 + row * 2.45);
+      card.userData.target.set((col - (rowCount - 1) / 2) * 1.82 - .35, .08 + col * .009, -1.4 + row * 2.45);
       card.userData.targetRot = 0;
       card.userData.zone = 'field';
     });
@@ -190,16 +220,27 @@
     raycaster.setFromCamera(pointer, camera);
   }
 
-  function cardHits() {
+  function handCardHits() {
     return raycaster.intersectObjects(hand.filter(c => c !== dragging), false);
+  }
+
+  function cardHits() {
+    return raycaster.intersectObjects([...hand, ...battlefield].filter(c => c !== dragging), false);
+  }
+
+  function setHovered(card) {
+    if (hovered === card) return;
+    hovered = card;
+    cardZoom = 0;
   }
 
   function onPointerDown(event) {
     setPointer(event);
     const deckHit = deckTop && raycaster.intersectObject(deckTop, false)[0];
     if (deckHit) { drawCard(); return; }
-    const hit = cardHits()[0];
+    const hit = handCardHits()[0];
     if (!hit) return;
+    setHovered(null);
     dragging = hit.object;
     const idx = hand.indexOf(dragging);
     if (idx >= 0) hand.splice(idx, 1);
@@ -223,8 +264,15 @@
       return;
     }
     const hit = cardHits()[0]?.object || null;
-    if (hovered !== hit) hovered = hit;
+    setHovered(hit);
     renderer.domElement.style.cursor = hit ? 'grab' : (raycaster.intersectObject(deckTop, false)[0] ? 'pointer' : 'default');
+  }
+
+  function onWheel(event) {
+    if (!hovered || dragging) return;
+    event.preventDefault();
+    const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
+    cardZoom = THREE.MathUtils.clamp(cardZoom - delta * .002, 0, 1);
   }
 
   function onPointerUp(event) {
@@ -243,11 +291,27 @@
     const t = performance.now() * .001;
     [...hand, ...battlefield].forEach(card => {
       if (card === dragging) return;
-      const hoverLift = card === hovered && card.userData.zone === 'hand' ? .42 : 0;
+      const isHovered = card === hovered;
+      const hoverLift = isHovered ? .9 : 0;
       const target = card.userData.target.clone(); target.y += hoverLift;
-      if (card === hovered) target.z -= .2;
+      if (isHovered) target.z += .3;
+      if (isHovered && cardZoom > 0) {
+        const distance = 2.18 / (1.2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
+        camera.getWorldDirection(cameraDirection);
+        zoomTarget.copy(camera.position).addScaledVector(cameraDirection, distance);
+        target.lerp(zoomTarget, cardZoom);
+      }
       card.position.lerp(target, .16);
-      card.rotation.z += (card.userData.targetRot - card.rotation.z) * .16;
+
+      if (isHovered) {
+        billboardTarget.position.copy(card.position);
+        billboardTarget.lookAt(camera.position);
+        targetQuaternion.copy(billboardTarget.quaternion);
+      } else {
+        flatCardQuaternion.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, card.userData.targetRot));
+        targetQuaternion.copy(flatCardQuaternion);
+      }
+      card.quaternion.slerp(targetQuaternion, .16);
     });
     if (deckTop) deckTop.position.y = .14 + Math.sin(t * 1.4) * .008;
     renderer.render(scene, camera);
@@ -277,6 +341,10 @@
   renderer.domElement.addEventListener('pointermove', onPointerMove);
   renderer.domElement.addEventListener('pointerup', onPointerUp);
   renderer.domElement.addEventListener('pointercancel', onPointerUp);
+  renderer.domElement.addEventListener('pointerleave', () => {
+    if (!dragging) setHovered(null);
+  });
+  renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
   addEventListener('keydown', event => {
     if (event.key.toLowerCase() === 'd') drawCard();
     if (event.key.toLowerCase() === 'r') location.reload();
