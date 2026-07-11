@@ -6,8 +6,8 @@
 #include <string.h>
 #include "cards.h"
 
-#define BASE_WINDOW_W 1100
-#define BASE_WINDOW_H 800
+#define BASE_WINDOW_W 1200
+#define BASE_WINDOW_H 900
 #define CARD_ATLAS_COLS 8
 #define CARD_ATLAS_ROWS 8
 #define MAX_HAND 12
@@ -28,6 +28,9 @@ typedef struct {
     TTF_Font *font_small;
     TTF_Font *font_value;
     SDL_Texture *atlas;
+    SDL_Texture *table;
+    SDL_Texture *card_front_chrome;
+    SDL_Texture *card_back;
     int atlas_w, atlas_h;
     int cell_w, cell_h;
 
@@ -58,11 +61,11 @@ static void compute_layout(Game *g) {
     g->win_w    = BASE_WINDOW_W;
     g->win_h    = BASE_WINDOW_H;
     g->card_w   = 160;
-    g->card_h   = 220;
+    g->card_h   = 240;
     g->card_gap = 12;
     g->margin   = 10;
-    g->hand_y   = g->win_h - g->card_h - 40;
-    g->row_y    = 180;
+    g->hand_y   = g->win_h - g->card_h - 34;
+    g->row_y    = 160;
     g->title_bar_h = 32;
     g->img_margin  = 10;
     g->img_h       = 90;
@@ -91,11 +94,11 @@ static bool game_init(Game *g) {
     if (!g->font_title) return false;
     g->font_title_sm = TTF_OpenFont("fonts/Cinzel.ttf", 10);
     if (!g->font_title_sm) return false;
-    g->font_body = TTF_OpenFont("fonts/Cardo-Regular.ttf", 11);
+    g->font_body = TTF_OpenFont("fonts/CrimsonText-Regular.ttf", 11);
     if (!g->font_body) return false;
-    g->font_body_italic = TTF_OpenFont("fonts/Cardo-Italic.ttf", 11);
+    g->font_body_italic = TTF_OpenFont("fonts/CrimsonText-Italic.ttf", 11);
     if (!g->font_body_italic) g->font_body_italic = g->font_body;
-    g->font_small = TTF_OpenFont("fonts/Cardo-Regular.ttf", 10);
+    g->font_small = TTF_OpenFont("fonts/CrimsonText-Regular.ttf", 10);
     if (!g->font_small) g->font_small = g->font_body;
     g->font_value = TTF_OpenFont("fonts/Cinzel.ttf", 16);
     if (!g->font_value) g->font_value = g->font_title;
@@ -110,6 +113,25 @@ static bool game_init(Game *g) {
     SDL_FreeSurface(surf);
     if (!g->atlas) return false;
 
+    surf = IMG_Load("table.png");
+    if (surf) {
+        g->table = SDL_CreateTextureFromSurface(g->renderer, surf);
+        SDL_FreeSurface(surf);
+    }
+
+    surf = IMG_Load("card-front-chrome.png");
+    if (!surf) return false;
+    g->card_front_chrome = SDL_CreateTextureFromSurface(g->renderer, surf);
+    SDL_FreeSurface(surf);
+    if (!g->card_front_chrome) return false;
+    SDL_SetTextureBlendMode(g->card_front_chrome, SDL_BLENDMODE_BLEND);
+
+    surf = IMG_Load("card-back.png");
+    if (!surf) return false;
+    g->card_back = SDL_CreateTextureFromSurface(g->renderer, surf);
+    SDL_FreeSurface(surf);
+    if (!g->card_back) return false;
+
     g->hand_count = 0;
     g->row_count = 0;
     g->dragging = false;
@@ -118,6 +140,9 @@ static bool game_init(Game *g) {
 }
 
 static void game_cleanup(Game *g) {
+    if (g->card_back) SDL_DestroyTexture(g->card_back);
+    if (g->card_front_chrome) SDL_DestroyTexture(g->card_front_chrome);
+    if (g->table) SDL_DestroyTexture(g->table);
     if (g->atlas) SDL_DestroyTexture(g->atlas);
     if (g->font_value && g->font_value != g->font_title) TTF_CloseFont(g->font_value);
     if (g->font_small && g->font_small != g->font_body) TTF_CloseFont(g->font_small);
@@ -130,19 +155,6 @@ static void game_cleanup(Game *g) {
     IMG_Quit();
     TTF_Quit();
     SDL_Quit();
-}
-
-static void draw_bevel(SDL_Renderer *r, const SDL_Rect *rect, bool raised) {
-    SDL_Color hi = raised ? (SDL_Color){255,255,255,255} : (SDL_Color){60,60,60,255};
-    SDL_Color lo = raised ? (SDL_Color){60,60,60,255} : (SDL_Color){255,255,255,255};
-
-    SDL_SetRenderDrawColor(r, hi.r, hi.g, hi.b, 255);
-    SDL_RenderDrawLine(r, rect->x, rect->y, rect->x + rect->w - 1, rect->y);
-    SDL_RenderDrawLine(r, rect->x, rect->y, rect->x, rect->y + rect->h - 1);
-
-    SDL_SetRenderDrawColor(r, lo.r, lo.g, lo.b, 255);
-    SDL_RenderDrawLine(r, rect->x, rect->y + rect->h - 1, rect->x + rect->w - 1, rect->y + rect->h - 1);
-    SDL_RenderDrawLine(r, rect->x + rect->w - 1, rect->y, rect->x + rect->w - 1, rect->y + rect->h - 1);
 }
 
 static void fill_rect(SDL_Renderer *r, const SDL_Rect *rect, Uint8 R, Uint8 G, Uint8 B) {
@@ -193,45 +205,42 @@ static void draw_card(Game *g, int card_idx, int x, int y, bool face_up) {
     int cw = g->card_w, ch = g->card_h;
     SDL_Rect dst = {x, y, cw, ch};
 
+    SDL_Rect shadow = {x + 5, y + 7, cw, ch};
+    SDL_SetRenderDrawColor(r, 13, 10, 8, 150);
+    SDL_RenderFillRect(r, &shadow);
+
     if (!face_up) {
-        SDL_SetRenderDrawColor(r, 30, 30, 100, 255);
-        SDL_RenderFillRect(r, &dst);
-        draw_bevel(r, &dst, true);
-
-        SDL_Rect inner = {x + 6, y + 6, cw - 12, ch - 12};
-        SDL_SetRenderDrawColor(r, 50, 50, 140, 255);
-        SDL_RenderFillRect(r, &inner);
-
-        SDL_SetRenderDrawColor(r, 70, 70, 160, 255);
-        for (int i = 0; i < inner.h; i += 10) {
-            SDL_RenderDrawLine(r, inner.x, inner.y + i, inner.x + inner.w, inner.y + i);
-        }
-        for (int i = 0; i < inner.w; i += 10) {
-            SDL_RenderDrawLine(r, inner.x + i, inner.y, inner.x + i, inner.y + inner.h);
-        }
+        SDL_RenderCopy(r, g->card_back, NULL, &dst);
         return;
     }
 
-    SDL_SetRenderDrawColor(r, 235, 225, 200, 255);
+    SDL_SetRenderDrawColor(r, 38, 25, 24, 255);
     SDL_RenderFillRect(r, &dst);
 
-    SDL_SetRenderDrawColor(r, 40, 30, 20, 255);
-    SDL_RenderDrawRect(r, &dst);
+    int col = card_idx % CARD_ATLAS_COLS;
+    int row = card_idx / CARD_ATLAS_COLS;
+    SDL_Rect src = {col * g->cell_w, row * g->cell_h, g->cell_w, g->cell_h};
 
-    SDL_Rect inner = {x + 3, y + 3, cw - 6, ch - 6};
-    SDL_SetRenderDrawColor(r, 160, 130, 60, 255);
-    SDL_RenderDrawRect(r, &inner);
+    /* The atlas cells are square: render them 1:1, flush with the card edges. */
+    SDL_Rect img_dst = {x, y, cw, cw};
+    SDL_RenderCopy(r, g->atlas, &src, &img_dst);
 
-    SDL_Rect title_bg = {x + 5, y + 5, cw - 10, 22};
-    SDL_SetRenderDrawColor(r, 210, 195, 160, 255);
+    SDL_Rect lower = {x, y + cw, cw, ch - cw};
+    SDL_SetRenderDrawColor(r, 218, 199, 157, 255);
+    SDL_RenderFillRect(r, &lower);
+
+    /* All ornamental chrome comes from a PNG asset. */
+    SDL_RenderCopy(r, g->card_front_chrome, NULL, &dst);
+
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_Rect title_bg = {x, y + cw - 31, cw, 31};
+    SDL_SetRenderDrawColor(r, 24, 13, 18, 205);
     SDL_RenderFillRect(r, &title_bg);
-    SDL_SetRenderDrawColor(r, 120, 100, 50, 255);
-    SDL_RenderDrawRect(r, &title_bg);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-    SDL_Color title_color = {30, 20, 10, 255};
+    SDL_Color title_color = {245, 226, 174, 255};
     const char *title = g_cards[card_idx].title;
     int max_text_w = cw - 16;
-
     TTF_Font *tf = g->font_title;
     SDL_Surface *ts = TTF_RenderText_Blended(tf, title, title_color);
     if (ts && ts->w > max_text_w) {
@@ -242,38 +251,16 @@ static void draw_card(Game *g, int card_idx, int x, int y, bool face_up) {
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(r, ts);
         int tx = x + (cw - ts->w) / 2;
-        if (tx < x + 8) tx = x + 8;
-        SDL_Rect tdst = {tx, y + 7, ts->w, ts->h};
+        SDL_Rect tdst = {tx, title_bg.y + (title_bg.h - ts->h) / 2, ts->w, ts->h};
         SDL_RenderCopy(r, tt, NULL, &tdst);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
     }
 
-    int col = card_idx % CARD_ATLAS_COLS;
-    int row = card_idx / CARD_ATLAS_COLS;
-    SDL_Rect src = {col * g->cell_w, row * g->cell_h, g->cell_w, g->cell_h};
-
-    int img_x = x + g->img_margin;
-    int img_y = y + 30;
-    int img_w = cw - g->img_margin * 2;
-    SDL_Rect img_dst = {img_x, img_y, img_w, g->img_h};
-    SDL_RenderCopy(r, g->atlas, &src, &img_dst);
-
-    SDL_SetRenderDrawColor(r, 80, 70, 50, 255);
-    SDL_RenderDrawRect(r, &img_dst);
-
-    int div_y = img_y + g->img_h + g->divider_gap;
-    SDL_SetRenderDrawColor(r, 120, 100, 50, 255);
-    SDL_RenderDrawLine(r, x + 8, div_y, x + cw - 8, div_y);
-
-    int text_x = x + g->text_margin;
-    int text_y = div_y + g->divider_gap;
+    int text_x = x + 13;
+    int text_y = y + cw + 25;
     int text_w = cw - g->text_margin * 2;
-    int text_h = ch - (div_y - y) - g->badge_size - g->divider_gap * 2;
-
-    SDL_Rect text_bg = {text_x - 2, text_y - 2, text_w + 4, text_h + 4};
-    SDL_SetRenderDrawColor(r, 225, 215, 190, 255);
-    SDL_RenderFillRect(r, &text_bg);
+    int text_h = ch - cw - 34;
 
     SDL_Color body_color = {50, 40, 30, 255};
     render_text_wordwrapped(r, g->font_body_italic, g_cards[card_idx].text,
@@ -284,7 +271,7 @@ static void draw_card(Game *g, int card_idx, int x, int y, bool face_up) {
     SDL_Color badge_fg = {240, 235, 220, 255};
 
     int bs = g->badge_size;
-    SDL_Rect badge = {x + cw - bs - 6, y + ch - bs - 6, bs, bs};
+    SDL_Rect badge = {x + cw - bs - 8, y + ch - bs - 7, bs, bs};
 
     SDL_SetRenderDrawColor(r, 80, 30, 30, 255);
     SDL_RenderFillRect(r, &badge);
@@ -368,19 +355,14 @@ static void handle_release(Game *g, float mx, float my) {
 static void draw_row(Game *g) {
     SDL_Renderer *r = g->renderer;
 
-    SDL_Color black = {0, 0, 0, 255};
-    SDL_Surface *ls = TTF_RenderText_Blended(g->font_title, "PLAY AREA", black);
-    if (ls) {
-        SDL_Texture *lt = SDL_CreateTextureFromSurface(r, ls);
-        SDL_Rect ld = {20, g->row_y - 28, ls->w, ls->h};
-        SDL_RenderCopy(r, lt, NULL, &ld);
-        SDL_DestroyTexture(lt);
-        SDL_FreeSurface(ls);
-    }
-
-    SDL_Rect row_bg = {g->margin, g->row_y - 8, g->win_w - g->margin*2, g->card_h + 20};
-    fill_rect(r, &row_bg, 170, 165, 145);
-    draw_bevel(r, &row_bg, false);
+    SDL_Rect row_bg = {g->margin, g->row_y - 12, g->win_w - g->margin*2, g->card_h + 24};
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 17, 25, 22, 105);
+    SDL_RenderFillRect(r, &row_bg);
+    SDL_SetRenderDrawColor(r, 182, 145, 72, 95);
+    SDL_RenderDrawLine(r, row_bg.x, row_bg.y, row_bg.x + row_bg.w, row_bg.y);
+    SDL_RenderDrawLine(r, row_bg.x, row_bg.y + row_bg.h, row_bg.x + row_bg.w, row_bg.y + row_bg.h);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
     int total_w = g->row_count * (g->card_w + g->card_gap) - g->card_gap;
     if (total_w < 0) total_w = 0;
@@ -393,19 +375,13 @@ static void draw_row(Game *g) {
 static void draw_hand(Game *g) {
     SDL_Renderer *r = g->renderer;
 
-    SDL_Color black = {0, 0, 0, 255};
-    SDL_Surface *ls = TTF_RenderText_Blended(g->font_title, "HAND", black);
-    if (ls) {
-        SDL_Texture *lt = SDL_CreateTextureFromSurface(r, ls);
-        SDL_Rect ld = {20, g->hand_y - 28, ls->w, ls->h};
-        SDL_RenderCopy(r, lt, NULL, &ld);
-        SDL_DestroyTexture(lt);
-        SDL_FreeSurface(ls);
-    }
-
-    SDL_Rect hand_bg = {g->margin, g->hand_y - 8, g->win_w - g->margin*2, g->card_h + 20};
-    fill_rect(r, &hand_bg, 155, 150, 130);
-    draw_bevel(r, &hand_bg, false);
+    SDL_Rect hand_bg = {g->margin, g->hand_y - 12, g->win_w - g->margin*2, g->card_h + 24};
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(r, 17, 20, 18, 125);
+    SDL_RenderFillRect(r, &hand_bg);
+    SDL_SetRenderDrawColor(r, 182, 145, 72, 95);
+    SDL_RenderDrawLine(r, hand_bg.x, hand_bg.y, hand_bg.x + hand_bg.w, hand_bg.y);
+    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
     for (int i = 0; i < g->hand_count; i++) {
         if (g->dragging && i == g->drag_hand_idx) continue;
@@ -420,16 +396,50 @@ static void draw_drag(Game *g) {
         (int)g->drag_x, (int)g->drag_y, true);
 }
 
+static void draw_deck(Game *g) {
+    int remaining = 64 - g->hand_count - g->row_count;
+    if (remaining <= 0) return;
+
+    int x = g->win_w - g->card_w - 26;
+    int y = 62;
+    for (int i = 0; i < 4; i++) {
+        SDL_Rect edge = {x - i * 2, y + i * 3, g->card_w, g->card_h};
+        SDL_SetRenderDrawColor(g->renderer, 198, 181, 142, 255);
+        SDL_RenderFillRect(g->renderer, &edge);
+        SDL_SetRenderDrawColor(g->renderer, 57, 39, 29, 255);
+        SDL_RenderDrawRect(g->renderer, &edge);
+    }
+    draw_card(g, 0, x - 8, y, false);
+
+    char label[32];
+    snprintf(label, sizeof(label), "DOSSIER  %02d", remaining);
+    SDL_Color gold = {225, 196, 126, 255};
+    SDL_Surface *s = TTF_RenderText_Blended(g->font_title_sm, label, gold);
+    if (s) {
+        SDL_Texture *t = SDL_CreateTextureFromSurface(g->renderer, s);
+        SDL_Rect d = {x + (g->card_w - s->w) / 2 - 8, y + g->card_h + 12, s->w, s->h};
+        SDL_RenderCopy(g->renderer, t, NULL, &d);
+        SDL_DestroyTexture(t);
+        SDL_FreeSurface(s);
+    }
+}
+
 static void draw_ui(Game *g) {
     SDL_Renderer *r = g->renderer;
 
-    SDL_SetRenderDrawColor(r, 192, 192, 192, 255);
+    SDL_SetRenderDrawColor(r, 30, 24, 19, 255);
     SDL_RenderClear(r);
+    if (g->table) {
+        SDL_Rect table_dst = {0, 0, g->win_w, g->win_h};
+        SDL_RenderCopy(r, g->table, NULL, &table_dst);
+    }
 
     SDL_Rect title = {0, 0, g->win_w, g->title_bar_h};
-    fill_rect(r, &title, 0, 0, 128);
-    SDL_Color white = {255, 255, 255, 255};
-    SDL_Surface *ts = TTF_RenderText_Blended(g->font_title, "Card Game", white);
+    fill_rect(r, &title, 24, 16, 19);
+    SDL_SetRenderDrawColor(r, 169, 126, 52, 255);
+    SDL_RenderDrawLine(r, 0, g->title_bar_h - 1, g->win_w, g->title_bar_h - 1);
+    SDL_Color white = {233, 212, 159, 255};
+    SDL_Surface *ts = TTF_RenderText_Blended(g->font_title, "THE HIDDEN ARCHIVE", white);
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(r, ts);
         SDL_Rect td = {8, 6, ts->w, ts->h};
@@ -441,7 +451,7 @@ static void draw_ui(Game *g) {
     char info[128];
     snprintf(info, sizeof(info), "Hand: %d  |  Row: %d  |  Deck: %d  |  [D] Deal  [ESC] Quit",
         g->hand_count, g->row_count, 64 - g->hand_count - g->row_count);
-    SDL_Color dgray = {64, 64, 64, 255};
+    SDL_Color dgray = {197, 181, 146, 255};
     SDL_Surface *is = TTF_RenderText_Blended(g->font_small, info, dgray);
     if (is) {
         SDL_Texture *it = SDL_CreateTextureFromSurface(r, is);
@@ -453,6 +463,7 @@ static void draw_ui(Game *g) {
 
     draw_row(g);
     draw_hand(g);
+    draw_deck(g);
     draw_drag(g);
 
     SDL_RenderPresent(r);
