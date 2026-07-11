@@ -24,7 +24,6 @@ typedef struct {
     TTF_Font *font_title;
     TTF_Font *font_title_sm;
     TTF_Font *font_body;
-    TTF_Font *font_body_italic;
     TTF_Font *font_small;
     TTF_Font *font_value;
     SDL_Texture *atlas;
@@ -61,16 +60,16 @@ static void compute_layout(Game *g) {
     g->win_w    = BASE_WINDOW_W;
     g->win_h    = BASE_WINDOW_H;
     g->card_w   = 160;
-    g->card_h   = 240;
+    g->card_h   = 224;
     g->card_gap = 12;
     g->margin   = 10;
     g->hand_y   = g->win_h - g->card_h - 34;
-    g->row_y    = 160;
+    g->row_y    = 150;
     g->title_bar_h = 32;
     g->img_margin  = 10;
     g->img_h       = 90;
     g->text_margin = 10;
-    g->badge_size  = 24;
+    g->badge_size  = 20;
     g->divider_gap = 4;
 }
 
@@ -90,17 +89,15 @@ static bool game_init(Game *g) {
 
     compute_layout(g);
 
-    g->font_title = TTF_OpenFont("fonts/Cinzel.ttf", 14);
+    g->font_title = TTF_OpenFont("fonts/CrimsonText-SemiBold.ttf", 14);
     if (!g->font_title) return false;
-    g->font_title_sm = TTF_OpenFont("fonts/Cinzel.ttf", 10);
+    g->font_title_sm = TTF_OpenFont("fonts/CrimsonText-SemiBold.ttf", 11);
     if (!g->font_title_sm) return false;
-    g->font_body = TTF_OpenFont("fonts/CrimsonText-Regular.ttf", 11);
+    g->font_body = TTF_OpenFont("fonts/CrimsonText-SemiBold.ttf", 11);
     if (!g->font_body) return false;
-    g->font_body_italic = TTF_OpenFont("fonts/CrimsonText-Italic.ttf", 11);
-    if (!g->font_body_italic) g->font_body_italic = g->font_body;
-    g->font_small = TTF_OpenFont("fonts/CrimsonText-Regular.ttf", 10);
+    g->font_small = TTF_OpenFont("fonts/CrimsonText-SemiBold.ttf", 10);
     if (!g->font_small) g->font_small = g->font_body;
-    g->font_value = TTF_OpenFont("fonts/Cinzel.ttf", 16);
+    g->font_value = TTF_OpenFont("fonts/CrimsonText-SemiBold.ttf", 16);
     if (!g->font_value) g->font_value = g->font_title;
 
     SDL_Surface *surf = IMG_Load("cards.png");
@@ -131,6 +128,7 @@ static bool game_init(Game *g) {
     g->card_back = SDL_CreateTextureFromSurface(g->renderer, surf);
     SDL_FreeSurface(surf);
     if (!g->card_back) return false;
+    SDL_SetTextureBlendMode(g->card_back, SDL_BLENDMODE_BLEND);
 
     g->hand_count = 0;
     g->row_count = 0;
@@ -146,7 +144,6 @@ static void game_cleanup(Game *g) {
     if (g->atlas) SDL_DestroyTexture(g->atlas);
     if (g->font_value && g->font_value != g->font_title) TTF_CloseFont(g->font_value);
     if (g->font_small && g->font_small != g->font_body) TTF_CloseFont(g->font_small);
-    if (g->font_body_italic && g->font_body_italic != g->font_body) TTF_CloseFont(g->font_body_italic);
     if (g->font_body) TTF_CloseFont(g->font_body);
     if (g->font_title_sm) TTF_CloseFont(g->font_title_sm);
     if (g->font_title) TTF_CloseFont(g->font_title);
@@ -205,65 +202,52 @@ static void draw_card(Game *g, int card_idx, int x, int y, bool face_up) {
     int cw = g->card_w, ch = g->card_h;
     SDL_Rect dst = {x, y, cw, ch};
 
-    SDL_Rect shadow = {x + 5, y + 7, cw, ch};
-    SDL_SetRenderDrawColor(r, 13, 10, 8, 150);
-    SDL_RenderFillRect(r, &shadow);
-
     if (!face_up) {
         SDL_RenderCopy(r, g->card_back, NULL, &dst);
         return;
     }
 
-    SDL_SetRenderDrawColor(r, 38, 25, 24, 255);
-    SDL_RenderFillRect(r, &dst);
-
     int col = card_idx % CARD_ATLAS_COLS;
     int row = card_idx / CARD_ATLAS_COLS;
-    SDL_Rect src = {col * g->cell_w, row * g->cell_h, g->cell_w, g->cell_h};
-
-    /* The atlas cells are square: render them 1:1, flush with the card edges. */
-    SDL_Rect img_dst = {x, y, cw, cw};
+    /* Crop the square atlas cell to the frame's wide illustration aperture. */
+    int crop_h = g->cell_w * 117 / 142;
+    int crop_y = (g->cell_h - crop_h) / 2;
+    SDL_Rect src = {col * g->cell_w, row * g->cell_h + crop_y,
+                    g->cell_w, crop_h};
+    SDL_Rect img_dst = {x + 9, y + 9, 142, 117};
     SDL_RenderCopy(r, g->atlas, &src, &img_dst);
-
-    SDL_Rect lower = {x, y + cw, cw, ch - cw};
-    SDL_SetRenderDrawColor(r, 218, 199, 157, 255);
-    SDL_RenderFillRect(r, &lower);
 
     /* All ornamental chrome comes from a PNG asset. */
     SDL_RenderCopy(r, g->card_front_chrome, NULL, &dst);
 
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-    SDL_Rect title_bg = {x, y + cw - 31, cw, 31};
-    SDL_SetRenderDrawColor(r, 24, 13, 18, 205);
-    SDL_RenderFillRect(r, &title_bg);
-    SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
-
-    SDL_Color title_color = {245, 226, 174, 255};
+    /* The PNG supplies a dedicated, high-contrast title plaque below the art. */
+    SDL_Rect title_area = {x + 10, y + 127, cw - 20, 15};
+    SDL_Color title_color = {231, 231, 218, 255};
     const char *title = g_cards[card_idx].title;
-    int max_text_w = cw - 16;
-    TTF_Font *tf = g->font_title;
+    int max_text_w = cw - 28;
+    TTF_Font *tf = g->font_title_sm;
     SDL_Surface *ts = TTF_RenderText_Blended(tf, title, title_color);
     if (ts && ts->w > max_text_w) {
         SDL_FreeSurface(ts);
-        tf = g->font_title_sm;
+        tf = g->font_small;
         ts = TTF_RenderText_Blended(tf, title, title_color);
     }
     if (ts) {
         SDL_Texture *tt = SDL_CreateTextureFromSurface(r, ts);
         int tx = x + (cw - ts->w) / 2;
-        SDL_Rect tdst = {tx, title_bg.y + (title_bg.h - ts->h) / 2, ts->w, ts->h};
+        SDL_Rect tdst = {tx, title_area.y + (title_area.h - ts->h) / 2, ts->w, ts->h};
         SDL_RenderCopy(r, tt, NULL, &tdst);
         SDL_DestroyTexture(tt);
         SDL_FreeSurface(ts);
     }
 
-    int text_x = x + 13;
-    int text_y = y + cw + 25;
-    int text_w = cw - g->text_margin * 2;
-    int text_h = ch - cw - 34;
+    int text_x = x + 9;
+    int text_y = y + 145;
+    int text_w = cw - 18;
+    int text_h = 70;
 
-    SDL_Color body_color = {50, 40, 30, 255};
-    render_text_wordwrapped(r, g->font_body_italic, g_cards[card_idx].text,
+    SDL_Color body_color = {29, 31, 27, 255};
+    render_text_wordwrapped(r, g->font_small, g_cards[card_idx].text,
                            body_color, text_x, text_y, text_w, text_h);
 
     char valbuf[8];
