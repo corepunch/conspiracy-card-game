@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0d0c">
+  <meta name="description" content="The Hidden Archive — a browser-based Three.js card game.">
+  <title>The Hidden Archive</title>
+  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./error.css">
+</head>
+<body>
+  <main id="game" aria-label="The Hidden Archive card table"></main>
+  <header class="topbar">
+    <div class="brand"><span class="sigil">◈</span><span>THE HIDDEN ARCHIVE</span></div>
+    <div class="turn"><span class="turn-dot"></span>YOUR TURN</div>
+    <button id="settings" class="icon-button" type="button" aria-label="Toggle help">?</button>
+  </header>
+  <section class="opponent" aria-label="Opponent status">
+    <div class="portrait">?</div>
+    <div><strong>UNKNOWN</strong><small>Waiting for rival</small></div>
+    <div class="life"><span>◆</span>20</div>
+  </section>
+  <section class="player" aria-label="Player status">
+    <div class="portrait active">I</div>
+    <div><strong>INVESTIGATOR</strong><small>Your dossier</small></div>
+    <div class="life"><span>◆</span>20</div>
+  </section>
+  <div id="deck-label" class="pile-label">DOSSIER <b>58</b><small>CLICK TO DRAW</small></div>
+  <div id="grave-label" class="pile-label muted">ARCHIVE <b>0</b></div>
+  <div id="hint" class="hint">DRAG A CARD ONTO THE BATTLEFIELD</div>
+  <aside id="help" class="help" hidden>
+    <button id="close-help" type="button" aria-label="Close help">×</button>
+    <h2>Field Manual</h2>
+    <p>Drag cards from your hand onto the highlighted battlefield. Drop outside it to return the card to your hand.</p>
+    <p>Click the dossier to draw. Press <kbd>D</kbd> to draw and <kbd>R</kbd> to reset the table.</p>
+  </aside>
+  <div id="loading" class="loading"><span></span><div id="loading-message">OPENING THE ARCHIVE…</div></div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="./cards.js"></script>
+  <script src="./game.js"></script>
+</body>
+</html>
