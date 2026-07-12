@@ -23,7 +23,7 @@ Read [RULES.md](./RULES.md) for setup, turn order, control attempts, the AI, and
 ## Controls
 
 - Drag a dossier onto the field to make a control attempt.
-- Hover and scroll to inspect a card.
+- Click or tap a card to inspect it; click or tap again to close it.
 - Select **Finish Turn** to let the Cabal act.
 - Press **R** to reset and reshuffle.
 

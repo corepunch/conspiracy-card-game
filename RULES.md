@@ -49,7 +49,7 @@ The Cabal follows the same income, cost, dice, and victory rules. On its turn it
 ## Controls
 
 - **Drag** a dossier onto the battlefield to attempt control.
-- **Hover and scroll** to inspect a card.
+- **Click or tap** a card to inspect it; click or tap again to close it.
 - Select **Finish Turn** to hand play to the Cabal.
 - Press **R** to shuffle and start a new game.
 

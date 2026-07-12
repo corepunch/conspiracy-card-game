@@ -69,7 +69,7 @@
   const opponentBattlefield = [];
   const motions = new Map();
   const State = Object.freeze({
-    SETUP: 'setup', PLAYER_IDLE: 'playerIdle', PLAYER_DRAGGING: 'playerDragging',
+    SETUP: 'setup', PLAYER_IDLE: 'playerIdle', PLAYER_DRAGGING: 'playerDragging', CARD_ZOOMED: 'cardZoomed',
     ROLLING_PLAYER: 'rollingPlayer', REPORTING_PLAYER: 'reportingPlayer',
     RESOLVING_PLAYER: 'resolvingPlayer', PLAYER_DONE: 'playerDone',
     AI_THINKING: 'aiThinking', ROLLING_AI: 'rollingAi', REPORTING_AI: 'reportingAi',
@@ -77,12 +77,13 @@
   });
   const allowedTransitions = {
     [State.SETUP]: [State.PLAYER_IDLE],
-    [State.PLAYER_IDLE]: [State.PLAYER_DRAGGING, State.AI_THINKING, State.GAME_OVER],
+    [State.PLAYER_IDLE]: [State.PLAYER_DRAGGING, State.CARD_ZOOMED, State.AI_THINKING, State.GAME_OVER],
     [State.PLAYER_DRAGGING]: [State.PLAYER_IDLE, State.ROLLING_PLAYER],
     [State.ROLLING_PLAYER]: [State.REPORTING_PLAYER],
     [State.REPORTING_PLAYER]: [State.RESOLVING_PLAYER],
     [State.RESOLVING_PLAYER]: [State.PLAYER_DONE, State.GAME_OVER],
-    [State.PLAYER_DONE]: [State.AI_THINKING, State.GAME_OVER],
+    [State.PLAYER_DONE]: [State.CARD_ZOOMED, State.AI_THINKING, State.GAME_OVER],
+    [State.CARD_ZOOMED]: [State.PLAYER_IDLE, State.PLAYER_DONE],
     [State.AI_THINKING]: [State.ROLLING_AI, State.PLAYER_IDLE, State.GAME_OVER],
     [State.ROLLING_AI]: [State.REPORTING_AI],
     [State.REPORTING_AI]: [State.RESOLVING_AI],
@@ -91,8 +92,11 @@
   };
   let deck = [];
   let dragging = null;
+  let pressedCard = null;
   let hovered = null;
   let cardZoom = 0;
+  let stateBeforeZoom = null;
+  let suppressNextClick = false;
   let table, deckTop;
   let dice = [];
   let diceShadows = [];
@@ -507,6 +511,7 @@
     playerGroupsLabel.textContent = `${playerGroupCount} ${playerGroupCount === 1 ? 'group' : 'groups'}`;
     opponentGroupsLabel.textContent = `${opponentGroupCount} ${opponentGroupCount === 1 ? 'group' : 'groups'}`;
     const status = state === State.GAME_OVER ? 'GAME OVER'
+      : state === State.CARD_ZOOMED ? 'INSPECTING DOSSIER · TAP TO CLOSE'
       : state === State.PLAYER_IDLE || state === State.PLAYER_DRAGGING ? 'YOUR TURN · 1 ATTACK'
         : state === State.PLAYER_DONE ? 'YOUR TURN · ATTACK USED'
           : [State.ROLLING_PLAYER, State.ROLLING_AI].includes(state) ? 'ROLLING DICE'
@@ -528,7 +533,7 @@
   }
 
   function resetGame(cards) {
-    dragging = null; hovered = null;
+    dragging = null; pressedCard = null; hovered = null; cardZoom = 0; stateBeforeZoom = null;
     hand.splice(0).forEach(c => { c.visible = false; });
     battlefield.splice(0).forEach(c => { c.visible = false; });
     archive.splice(0).forEach(c => { c.visible = false; });
@@ -623,40 +628,69 @@
     raycaster.setFromCamera(pointer, camera);
   }
 
-  function handCardHits() {
-    return raycaster.intersectObjects(hand.filter(c => c !== dragging), false);
-  }
-
   function cardHits() {
     return raycaster.intersectObjects([...hand, ...battlefield].filter(c => c !== dragging), false);
   }
 
   function setHovered(card) {
+    if (state === State.CARD_ZOOMED) return;
     if (hovered === card) return;
     hovered = card;
     cardZoom = 0;
   }
 
+  function openCardZoom(card) {
+    stateBeforeZoom = state;
+    hovered = card;
+    cardZoom = 0;
+    transition(State.CARD_ZOOMED);
+    renderer.domElement.style.cursor = 'zoom-out';
+  }
+
+  function closeCardZoom() {
+    if (state !== State.CARD_ZOOMED) return;
+    const returnState = stateBeforeZoom;
+    stateBeforeZoom = null;
+    hovered = null;
+    cardZoom = 0;
+    transition(returnState);
+    renderer.domElement.style.cursor = 'default';
+  }
+
   function onPointerDown(event) {
-    if (state !== State.PLAYER_IDLE || playerTokens < 1) return;
+    if (state === State.CARD_ZOOMED) {
+      closeCardZoom();
+      return;
+    }
+    if (![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state)) return;
     setPointer(event);
     const deckHit = deckTop && raycaster.intersectObject(deckTop, false)[0];
     if (deckHit) return;
-    const hit = handCardHits()[0];
+    const hit = cardHits()[0];
     if (!hit) return;
+    pressedCard = { card: hit.object, x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+    renderer.domElement.setPointerCapture?.(event.pointerId);
+  }
+
+  function beginDrag(event) {
+    if (!pressedCard || state !== State.PLAYER_IDLE || playerTokens < 1 || !hand.includes(pressedCard.card)) return false;
+    dragging = pressedCard.card;
+    pressedCard = null;
     setHovered(null);
-    dragging = hit.object;
     transition(State.PLAYER_DRAGGING);
     const idx = hand.indexOf(dragging);
     if (idx >= 0) hand.splice(idx, 1);
     dragging.userData.zone = 'drag'; dragging.renderOrder = 100;
-    renderer.domElement.setPointerCapture?.(event.pointerId);
     layoutHand();
-    onPointerMove(event);
+    return true;
   }
 
   function onPointerMove(event) {
     setPointer(event);
+    if (pressedCard) {
+      const distance = Math.hypot(event.clientX - pressedCard.x, event.clientY - pressedCard.y);
+      if (distance < 8 || !beginDrag(event)) return;
+    }
     if (dragging) {
       const point = new THREE.Vector3();
       raycaster.ray.intersectPlane(dragPlane, point);
@@ -673,14 +707,14 @@
     renderer.domElement.style.cursor = hit ? 'grab' : (raycaster.intersectObject(deckTop, false)[0] ? 'pointer' : 'default');
   }
 
-  function onWheel(event) {
-    if (!hovered || dragging) return;
-    event.preventDefault();
-    const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
-    cardZoom = THREE.MathUtils.clamp(cardZoom - delta * .002, 0, 1);
-  }
-
   function onPointerUp(event) {
+    if (pressedCard) {
+      const card = pressedCard.card;
+      pressedCard = null;
+      renderer.domElement.releasePointerCapture?.(event.pointerId);
+      openCardZoom(card);
+      return;
+    }
     if (!dragging) return;
     const card = dragging;
     dragging = null; hint.classList.remove('show');
@@ -689,6 +723,11 @@
     else { hand.push(card); layoutHand(); transition(State.PLAYER_IDLE); }
     renderer.domElement.style.cursor = 'default';
     renderer.domElement.releasePointerCapture?.(event.pointerId);
+  }
+
+  function onPointerCancel(event) {
+    if (pressedCard) pressedCard = null;
+    if (dragging) onPointerUp(event);
   }
 
   function animate() {
@@ -766,6 +805,7 @@
       }
       card.quaternion.slerp(targetQuaternion, .16);
     });
+    cardZoom = THREE.MathUtils.lerp(cardZoom, state === State.CARD_ZOOMED ? 1 : 0, .18);
     if (deckTop) deckTop.position.y = .14 + Math.sin(t * 1.4) * .008;
     renderer.render(scene, camera);
   }
@@ -794,12 +834,25 @@
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   renderer.domElement.addEventListener('pointermove', onPointerMove);
   renderer.domElement.addEventListener('pointerup', onPointerUp);
-  renderer.domElement.addEventListener('pointercancel', onPointerUp);
+  renderer.domElement.addEventListener('pointercancel', onPointerCancel);
   renderer.domElement.addEventListener('pointerleave', () => {
-    if (!dragging) setHovered(null);
+    if (!dragging && !pressedCard) setHovered(null);
   });
-  renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+  document.addEventListener('pointerdown', event => {
+    if (state !== State.CARD_ZOOMED || event.target === renderer.domElement) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    suppressNextClick = true;
+    closeCardZoom();
+  }, true);
+  document.addEventListener('click', event => {
+    if (!suppressNextClick) return;
+    suppressNextClick = false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
   addEventListener('keydown', event => {
+    if (state === State.CARD_ZOOMED) return;
     if (event.key.toLowerCase() === 'r') location.reload();
   });
   addEventListener('resize', () => {
