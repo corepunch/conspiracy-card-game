@@ -95,6 +95,7 @@
   let cardZoom = 0;
   let table, deckTop;
   let dice = [];
+  let diceShadows = [];
   let diceAnimation = null;
   let archiveCount = 0;
   let playerTokens = 10;
@@ -223,12 +224,93 @@
     const materials = valuesByFace.map(value => new THREE.MeshStandardMaterial({
       map: makeDieFaceTexture(baseTexture.image, value), roughness: .48, metalness: .12
     }));
-    const geometry = new THREE.BoxGeometry(1.05, 1.05, 1.05, 3, 3, 3);
+    // A common 16 mm die is roughly one quarter of a 63 mm MTG card's width.
+    const dieSize = 1.56 * 16 / 63;
+    const geometry = new THREE.BoxGeometry(dieSize, dieSize, dieSize, 2, 2, 2);
     dice = [-1, 1].map((side, i) => {
       const die = new THREE.Mesh(geometry, materials); die.visible = false;
       die.castShadow = true; die.receiveShadow = true; die.renderOrder = 200 + i;
       scene.add(die); return die;
     });
+    const shadowGeometry = new THREE.PlaneGeometry(dieSize * .88, dieSize * .88);
+    const shadowMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .72, depthWrite: false });
+    diceShadows = dice.map((die, i) => {
+      const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
+      shadow.rotation.x = -Math.PI / 2; shadow.position.y = -.075;
+      shadow.visible = false; shadow.renderOrder = 190 + i; scene.add(shadow);
+      return shadow;
+    });
+  }
+
+  function createDieBody(die, velocity, angular) {
+    const half = die.geometry.parameters.width / 2;
+    const points = [];
+    for (let x = -1; x <= 1; x += 2) for (let y = -1; y <= 1; y += 2) for (let z = -1; z <= 1; z += 2) {
+      const local = new THREE.Vector3(x * half, y * half, z * half).applyQuaternion(die.quaternion);
+      const position = die.position.clone().add(local);
+      const pointVelocity = velocity.clone().add(new THREE.Vector3().crossVectors(angular, local));
+      points.push({ position, previous: position.clone().addScaledVector(pointVelocity, -1 / 120) });
+    }
+    const constraints = [];
+    for (let a = 0; a < points.length; a++) for (let b = a + 1; b < points.length; b++) {
+      constraints.push({ a, b, length: points[a].position.distanceTo(points[b].position) });
+    }
+    return { points, constraints, half };
+  }
+
+  function syncDieFromBody(die, body) {
+    die.position.set(0, 0, 0);
+    body.points.forEach(point => die.position.add(point.position));
+    die.position.multiplyScalar(1 / body.points.length);
+    const x = body.points[4].position.clone().sub(body.points[0].position).normalize();
+    const y = body.points[2].position.clone().sub(body.points[0].position).normalize();
+    const z = new THREE.Vector3().crossVectors(x, y).normalize();
+    y.crossVectors(z, x).normalize();
+    die.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+  }
+
+  function simulateDiceStep(bodies, dt) {
+    const floor = -.09;
+    // Card scale: 2.18 scene units = 88 mm, so terrestrial gravity is ~243 units/s².
+    const gravity = 9.81 * (2.18 / .088);
+    const deskRestitution = .58;
+    const contactFriction = .08;
+    bodies.forEach(body => {
+      body.points.forEach(point => {
+        const velocity = point.position.clone().sub(point.previous).multiplyScalar(.999);
+        point.previous.copy(point.position);
+        point.position.add(velocity); point.position.y -= gravity * dt * dt;
+      });
+    });
+    for (let iteration = 0; iteration < 7; iteration++) {
+      bodies.forEach(body => {
+        body.constraints.forEach(constraint => {
+          const a = body.points[constraint.a].position, b = body.points[constraint.b].position;
+          const delta = b.clone().sub(a); const distance = Math.max(delta.length(), 1e-6);
+          delta.multiplyScalar((distance - constraint.length) / distance * .5);
+          a.add(delta); b.sub(delta);
+        });
+        body.points.forEach(point => {
+          if (point.position.y < floor) {
+            point.position.y = floor;
+            point.previous.x += (point.position.x - point.previous.x) * contactFriction;
+            point.previous.z += (point.position.z - point.previous.z) * contactFriction;
+            if (point.previous.y > floor) {
+              point.previous.y = floor - (point.previous.y - floor) * deskRestitution;
+            }
+          }
+          point.position.x = THREE.MathUtils.clamp(point.position.x, -8.45, 8.45);
+          point.position.z = THREE.MathUtils.clamp(point.position.z, -7.05, 5.65);
+        });
+      });
+      const centers = bodies.map(body => body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / 8));
+      const delta = centers[1].clone().sub(centers[0]);
+      const overlap = bodies[0].half * 2 - Math.max(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z));
+      if (overlap > 0) {
+        const axis = Math.abs(delta.x) >= Math.abs(delta.z) ? new THREE.Vector3(Math.sign(delta.x) || 1, 0, 0) : new THREE.Vector3(0, 0, Math.sign(delta.z) || 1);
+        bodies.forEach((body, i) => body.points.forEach(point => point.position.addScaledVector(axis, (i ? 1 : -1) * overlap * .25)));
+      }
+    }
   }
 
   function resultQuaternion(value) {
@@ -239,17 +321,30 @@
     return new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotations[value]));
   }
 
-  function rollPhysicalDice(values) {
+  function rollPhysicalDice(values, owner) {
+    const isPlayer = owner === 'player';
     dice.forEach((die, i) => {
-      die.visible = true; die.position.set(i ? .55 : -.55, 3.5 + i * .35, 1.25);
+      die.visible = true; diceShadows[i].visible = true;
+      // Player: camera-right/bottom. Opponent: their right, seen by us at top-left.
+      die.position.set(
+        isPlayer ? 5.2 + i * .34 : -5.2 - i * .34,
+        1.5 + i * .22,
+        isPlayer ? 4.35 + i * .12 : -4.75 - i * .12
+      );
       die.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
     });
     return new Promise(resolve => {
+      const direction = isPlayer ? 1 : -1;
       diceAnimation = {
         values, start: performance.now(), resolve, settled: false,
-        velocities: [new THREE.Vector3(-1.35, 4.8, -2.1), new THREE.Vector3(1.25, 5.3, -2.35)],
-        angular: [new THREE.Vector3(8.7, 11.4, 7.1), new THREE.Vector3(-10.2, 8.9, 12.3)], last: performance.now()
+        velocities: [
+          new THREE.Vector3(-18 * direction, 27, -16 * direction),
+          new THREE.Vector3(-21 * direction, 30, -13 * direction)
+        ],
+        angular: [new THREE.Vector3(11.7, 14.4, 10.1), new THREE.Vector3(-13.2, 11.9, 15.3)],
+        accumulator: 0, last: performance.now()
       };
+      diceAnimation.bodies = dice.map((die, i) => createDieBody(die, diceAnimation.velocities[i], diceAnimation.angular[i]));
     });
   }
 
@@ -260,6 +355,7 @@
     await new Promise(resolve => setTimeout(resolve, 520));
     rollResult.classList.remove('show');
     dice.forEach(die => { die.visible = false; });
+    diceShadows.forEach(shadow => { shadow.visible = false; });
   }
 
   function layoutHand() {
@@ -385,7 +481,7 @@
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
     const diceValues = rollDice();
-    await rollPhysicalDice(diceValues);
+    await rollPhysicalDice(diceValues, 'player');
     const roll = diceValues[0] + diceValues[1];
     await reportRoll(roll, 'player');
     transition(State.RESOLVING_PLAYER);
@@ -420,7 +516,7 @@
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
       const diceValues = rollDice();
       transition(State.ROLLING_AI);
-      await rollPhysicalDice(diceValues);
+      await rollPhysicalDice(diceValues, 'ai');
       const roll = diceValues[0] + diceValues[1];
       await reportRoll(roll, 'ai');
       transition(State.RESOLVING_AI);
@@ -530,32 +626,35 @@
       const animation = diceAnimation;
       const elapsed = (now - animation.start) / 1000;
       const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
-      if (elapsed < 1.65) {
-        dice.forEach((die, i) => {
-          animation.velocities[i].y -= 12.5 * dt;
-          die.position.addScaledVector(animation.velocities[i], dt);
-          die.rotation.x += animation.angular[i].x * dt;
-          die.rotation.y += animation.angular[i].y * dt;
-          die.rotation.z += animation.angular[i].z * dt;
-          if (die.position.y < .62) {
-            die.position.y = .62; animation.velocities[i].y = Math.abs(animation.velocities[i].y) * .46;
-            animation.velocities[i].x *= .78; animation.velocities[i].z *= .78;
-            animation.angular[i].multiplyScalar(.82);
-          }
-        });
+      if (elapsed < 3.3) {
+        animation.accumulator += dt;
+        const fixedStep = 1 / 120;
+        while (animation.accumulator >= fixedStep) {
+          simulateDiceStep(animation.bodies, fixedStep);
+          animation.accumulator -= fixedStep;
+        }
+        dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
       } else {
         if (!animation.settled) {
           animation.settled = true; animation.settleStart = now;
           animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
         }
-        const p = Math.min(1, (now - animation.settleStart) / 380);
+        const p = Math.min(1, (now - animation.settleStart) / 620);
         const eased = 1 - Math.pow(1 - p, 3);
         dice.forEach((die, i) => {
-          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .68 : -.68, .62, -.45), eased);
+          const half = die.geometry.parameters.width / 2;
+          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .3 : -.3, -.09 + half, -.45), eased);
           die.quaternion.slerpQuaternions(animation.from[i].quaternion, resultQuaternion(animation.values[i]), eased);
         });
         if (p === 1) { diceAnimation = null; animation.resolve(); }
       }
+      diceShadows.forEach((shadow, i) => {
+        shadow.position.x = dice[i].position.x; shadow.position.z = dice[i].position.z;
+        const height = Math.max(0, dice[i].position.y);
+        const scale = THREE.MathUtils.clamp(1 + height * .12, 1, 1.45);
+        shadow.scale.setScalar(scale);
+        shadow.material.opacity = THREE.MathUtils.lerp(.72, .28, THREE.MathUtils.clamp(height / 4, 0, 1));
+      });
     }
     [...hand, ...battlefield, ...archive, ...opponentBattlefield].forEach(card => {
       if (card === dragging || motions.has(card)) return;
