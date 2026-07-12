@@ -64,6 +64,24 @@
   const zoomTarget = new THREE.Vector3();
   const hand = [];
   const battlefield = [];
+  const archive = [];
+  const opponentBattlefield = [];
+  const motions = new Map();
+  const State = Object.freeze({
+    SETUP: 'setup', PLAYER_IDLE: 'playerIdle', PLAYER_DRAGGING: 'playerDragging',
+    RESOLVING_PLAYER: 'resolvingPlayer', PLAYER_DONE: 'playerDone',
+    AI_THINKING: 'aiThinking', RESOLVING_AI: 'resolvingAi', GAME_OVER: 'gameOver'
+  });
+  const allowedTransitions = {
+    [State.SETUP]: [State.PLAYER_IDLE],
+    [State.PLAYER_IDLE]: [State.PLAYER_DRAGGING, State.AI_THINKING, State.GAME_OVER],
+    [State.PLAYER_DRAGGING]: [State.PLAYER_IDLE, State.RESOLVING_PLAYER],
+    [State.RESOLVING_PLAYER]: [State.PLAYER_DONE, State.GAME_OVER],
+    [State.PLAYER_DONE]: [State.AI_THINKING, State.GAME_OVER],
+    [State.AI_THINKING]: [State.RESOLVING_AI, State.PLAYER_IDLE, State.GAME_OVER],
+    [State.RESOLVING_AI]: [State.PLAYER_IDLE, State.GAME_OVER],
+    [State.GAME_OVER]: []
+  };
   let deck = [];
   let dragging = null;
   let hovered = null;
@@ -74,9 +92,7 @@
   let opponentTokens = 10;
   let opponentGroupCount = 1;
   let opponentPower = 2;
-  let playerTurn = true;
-  let attackUsed = false;
-  let gameOver = false;
+  let state = State.SETUP;
 
   const textureLoader = new THREE.TextureLoader();
   const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
@@ -202,6 +218,41 @@
     });
   }
 
+  function layoutOpponentBattlefield() {
+    opponentBattlefield.forEach((card, i) => {
+      card.userData.target.set((i - (opponentBattlefield.length - 1) / 2) * 1.3 - .4, .08 + i * .009, -4.55);
+      card.userData.targetRot = Math.PI;
+      card.userData.zone = 'opponent-field';
+    });
+  }
+
+  function transition(next) {
+    if (state === next) return;
+    if (!allowedTransitions[state]?.includes(next)) throw new Error(`Invalid game transition: ${state} → ${next}`);
+    state = next;
+    updateLabels();
+  }
+
+  function moveCard(card, target, targetRot = 0, duration = 650) {
+    return new Promise(resolve => {
+      motions.set(card, {
+        from: card.position.clone(), to: target.clone(),
+        fromQuat: card.quaternion.clone(), toQuat: new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, targetRot)),
+        start: performance.now(), duration, resolve
+      });
+    });
+  }
+
+  async function discardCard(card) {
+    archive.push(card);
+    archiveCount = archive.length;
+    card.visible = true; card.userData.zone = 'archive'; card.renderOrder = 50 + archive.length;
+    const target = new THREE.Vector3(4.45 + Math.min(archive.length, 8) * .006, .12 + archive.length * .012, .12);
+    card.userData.target.copy(target); card.userData.targetRot = .02 * ((archive.length % 3) - 1);
+    updateLabels();
+    await moveCard(card, target, card.userData.targetRot, 720);
+  }
+
   function updateLabels() {
     deckLabel.querySelector('b').textContent = deck.length;
     archiveLabel.querySelector('b').textContent = archiveCount;
@@ -211,8 +262,13 @@
     const playerGroupCount = battlefield.length + 1;
     playerGroupsLabel.textContent = `${playerGroupCount} ${playerGroupCount === 1 ? 'group' : 'groups'}`;
     opponentGroupsLabel.textContent = `${opponentGroupCount} ${opponentGroupCount === 1 ? 'group' : 'groups'}`;
-    turnStatus.innerHTML = `<span class="turn-dot"></span>${gameOver ? 'GAME OVER' : playerTurn ? `YOUR TURN · ${attackUsed ? 'ATTACK USED' : '1 ATTACK'}` : 'THE CABAL IS ACTING'}`;
-    finishTurnButton.disabled = !playerTurn || gameOver;
+    const status = state === State.GAME_OVER ? 'GAME OVER'
+      : state === State.PLAYER_IDLE || state === State.PLAYER_DRAGGING ? 'YOUR TURN · 1 ATTACK'
+        : state === State.PLAYER_DONE ? 'YOUR TURN · ATTACK USED'
+          : state === State.RESOLVING_PLAYER ? 'RESOLVING ATTACK'
+            : 'THE CABAL IS ACTING';
+    turnStatus.innerHTML = `<span class="turn-dot"></span>${status}`;
+    finishTurnButton.disabled = ![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state);
   }
 
   function drawCard() {
@@ -229,14 +285,16 @@
     dragging = null; hovered = null;
     hand.splice(0).forEach(c => { c.visible = false; });
     battlefield.splice(0).forEach(c => { c.visible = false; });
+    archive.splice(0).forEach(c => { c.visible = false; });
+    opponentBattlefield.splice(0).forEach(c => { c.visible = false; });
+    motions.clear();
     deck = [...cards].sort(() => Math.random() - .5);
     deck.forEach(c => { c.visible = false; c.userData.zone = 'deck'; });
     archiveCount = 0; playerTokens = 10; opponentTokens = 10;
-    opponentGroupCount = 1; opponentPower = 2; playerTurn = true;
-    attackUsed = false; gameOver = false;
+    opponentGroupCount = 1; opponentPower = 2; state = State.SETUP;
     for (let i = 0; i < 5; i++) drawCard();
     eventLog.textContent = 'Build your power structure. Drag one dossier into the field to attack it.';
-    updateLabels();
+    transition(State.PLAYER_IDLE);
   }
 
   const rollDice = () => 2 + Math.floor(Math.random() * 6) + Math.floor(Math.random() * 6);
@@ -245,16 +303,16 @@
 
   function checkVictory() {
     if (battlefield.length + 1 >= 7) {
-      gameOver = true; eventLog.textContent = 'WORLD CONTROLLED — the Illuminati win.';
+      eventLog.textContent = 'WORLD CONTROLLED — the Illuminati win.'; transition(State.GAME_OVER);
     } else if (opponentGroupCount >= 7) {
-      gameOver = true; eventLog.textContent = 'THE CABAL CONTROLS THE WORLD. Press R to try again.';
+      eventLog.textContent = 'THE CABAL CONTROLS THE WORLD. Press R to try again.'; transition(State.GAME_OVER);
     }
     updateLabels();
   }
 
-  function attackCard(card) {
-    if (!playerTurn || attackUsed || playerTokens < 1 || gameOver) return false;
-    playerTokens -= 1; attackUsed = true;
+  async function attackCard(card) {
+    transition(State.RESOLVING_PLAYER);
+    playerTokens -= 1;
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
     const roll = rollDice();
@@ -262,26 +320,29 @@
       battlefield.push(card);
       eventLog.textContent = `${cardName(card)} controlled: rolled ${roll}, needed ${target} or less.`;
       layoutBattlefield();
+      await moveCard(card, card.userData.target, card.userData.targetRot, 620);
     } else {
-      card.visible = false; card.userData.zone = 'archive'; archiveCount += 1;
       eventLog.textContent = `${cardName(card)} resisted: rolled ${roll}, needed ${target} or less.`;
+      await discardCard(card);
     }
-    updateLabels(); checkVictory();
-    return true;
+    checkVictory();
+    if (state !== State.GAME_OVER) transition(State.PLAYER_DONE);
   }
 
   function finishTurn() {
-    if (!playerTurn || gameOver) return;
-    playerTurn = false; updateLabels();
+    if (![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state)) return;
+    transition(State.AI_THINKING);
     eventLog.textContent = 'The Cabal considers its target…';
     setTimeout(runAiTurn, 650);
   }
 
-  function runAiTurn() {
-    if (gameOver) return;
+  async function runAiTurn() {
+    if (state !== State.AI_THINKING) return;
     opponentTokens += 2 + Math.floor((opponentGroupCount - 1) / 3);
     const card = deck.pop();
     if (card && opponentTokens > 0) {
+      transition(State.RESOLVING_AI);
+      card.visible = true; card.position.copy(deckTop.position); card.position.y = .4;
       opponentTokens -= 1;
       const value = cardValue(card);
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
@@ -289,16 +350,17 @@
       if (roll <= target) {
         opponentGroupCount += 1; opponentPower = Math.max(opponentPower, value);
         eventLog.textContent = `The Cabal controls ${cardName(card)} (rolled ${roll} vs ${target}).`;
+        opponentBattlefield.push(card); layoutOpponentBattlefield();
+        await moveCard(card, card.userData.target, card.userData.targetRot, 720);
       } else {
-        archiveCount += 1;
         eventLog.textContent = `The Cabal failed to control ${cardName(card)} (rolled ${roll} vs ${target}).`;
+        await discardCard(card);
       }
-      card.visible = false; card.userData.zone = 'archive';
     } else eventLog.textContent = 'The Cabal passes.';
     checkVictory();
-    if (gameOver) return;
+    if (state === State.GAME_OVER) return;
     playerTokens += 2 + Math.floor(battlefield.length / 3);
-    playerTurn = true; attackUsed = false; drawCard(); updateLabels();
+    drawCard(); transition(State.PLAYER_IDLE);
   }
 
   function setPointer(event) {
@@ -323,6 +385,7 @@
   }
 
   function onPointerDown(event) {
+    if (state !== State.PLAYER_IDLE || playerTokens < 1) return;
     setPointer(event);
     const deckHit = deckTop && raycaster.intersectObject(deckTop, false)[0];
     if (deckHit) return;
@@ -330,6 +393,7 @@
     if (!hit) return;
     setHovered(null);
     dragging = hit.object;
+    transition(State.PLAYER_DRAGGING);
     const idx = hand.indexOf(dragging);
     if (idx >= 0) hand.splice(idx, 1);
     dragging.userData.zone = 'drag'; dragging.renderOrder = 100;
@@ -368,17 +432,25 @@
     const card = dragging;
     dragging = null; hint.classList.remove('show');
     const valid = card.position.z > -3.55 && card.position.z < 1.65 && Math.abs(card.position.x + .4) < 5.7;
-    if (valid && attackCard(card)) { /* resolved by the control attempt */ }
-    else { hand.push(card); layoutHand(); }
+    if (valid) attackCard(card);
+    else { hand.push(card); layoutHand(); transition(State.PLAYER_IDLE); }
     renderer.domElement.style.cursor = 'default';
     renderer.domElement.releasePointerCapture?.(event.pointerId);
   }
 
   function animate() {
     requestAnimationFrame(animate);
-    const t = performance.now() * .001;
-    [...hand, ...battlefield].forEach(card => {
-      if (card === dragging) return;
+    const now = performance.now();
+    const t = now * .001;
+    motions.forEach((motion, card) => {
+      const progress = Math.min(1, (now - motion.start) / motion.duration);
+      const eased = progress * progress * (3 - 2 * progress);
+      card.position.lerpVectors(motion.from, motion.to, eased);
+      card.quaternion.slerpQuaternions(motion.fromQuat, motion.toQuat, eased);
+      if (progress === 1) { motions.delete(card); motion.resolve(); }
+    });
+    [...hand, ...battlefield, ...archive, ...opponentBattlefield].forEach(card => {
+      if (card === dragging || motions.has(card)) return;
       const isHovered = card === hovered;
       const hoverLift = isHovered ? .9 : 0;
       const target = card.userData.target.clone(); target.y += hoverLift;
