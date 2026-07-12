@@ -163,17 +163,19 @@
     const col = index % 8, row = Math.floor(index / 8);
     const cropH = cellW * 117 / 142;
     ctx.fillStyle = '#d7ccb0'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(atlas, col * cellW, row * cellH + (cellH - cropH) / 2, cellW, cropH, 36, 36, 564, 468);
+    // Bleed the artwork just beyond the chrome's transparent window so texture
+    // filtering cannot reveal the card-colored canvas along its inner edge.
+    ctx.drawImage(atlas, col * cellW, row * cellH + (cellH - cropH) / 2, cellW, cropH, 30, 29, 575, 473);
     ctx.drawImage(chrome, 0, 0, canvas.width, canvas.height);
     const [title, value] = CARD_DATA[index];
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#eee8d7';
-    fitTitle(ctx, title, 540); ctx.fillText(title, 318, 541);
+    fitTitle(ctx, title, 532); ctx.fillText(title, 318, 533);
     ctx.font = '32px Cardo'; ctx.textAlign = 'left'; ctx.fillStyle = '#29251e';
     ctx.fillText('Conspiracy  •  Dossier', 52, 600);
     ctx.font = '29px Crimson';
     const copy = ['Uncover the hidden connection.', 'Deploy this dossier to the field', 'to advance your investigation.'];
     copy.forEach((line, i) => ctx.fillText(line, 52, 659 + i * 38));
-    ctx.fillStyle = '#f2e6c7'; ctx.textAlign = 'center'; ctx.font = 'bold 44px Cardo';
+    ctx.fillStyle = '#29251e'; ctx.textAlign = 'center'; ctx.font = 'bold 44px Cardo';
     ctx.fillText(String(value), 557, 817);
     return canvasTexture(canvas);
   }
@@ -199,8 +201,9 @@
     table.receiveShadow = true;
     scene.add(table);
 
-    const zone = new THREE.Mesh(new THREE.PlaneGeometry(11.4, 4.15), new THREE.MeshBasicMaterial({ color: 0x9b7436, transparent: true, opacity: 0.045, side: THREE.DoubleSide }));
-    zone.rotation.x = -Math.PI / 2; zone.position.set(-0.4, 0.012, -1.05); zone.name = 'battle-zone';
+    // Battle zone: covers player field rows (z = -1.4 to +2.8), centered at z = 0.7
+    const zone = new THREE.Mesh(new THREE.PlaneGeometry(11.4, 4.4), new THREE.MeshBasicMaterial({ color: 0x9b7436, transparent: true, opacity: 0.045, side: THREE.DoubleSide }));
+    zone.rotation.x = -Math.PI / 2; zone.position.set(-0.4, 0.012, 0.7); zone.name = 'battle-zone';
     scene.add(zone);
     const border = new THREE.LineSegments(new THREE.EdgesGeometry(zone.geometry), new THREE.LineBasicMaterial({ color: 0xb58b45, transparent: true, opacity: 0.24 }));
     border.rotation.copy(zone.rotation); border.position.copy(zone.position); scene.add(border);
@@ -391,11 +394,23 @@
     }
   }
 
-  function rollPhysicalDice(owner) {
+  // Roll values are decided here (pure RNG), before physics plays out.
+  // The physics sim is purely cosmetic; at reveal time the die snaps to show the pre-rolled face.
+  function rollD6() { return Math.floor(Math.random() * 6) + 1; }
+
+  // Returns a quaternion that puts `targetValue` face-up.
+  function quaternionForFaceUp(targetValue) {
+    const face = dieFaceNormals.find(f => f.value === targetValue);
+    const up = new THREE.Vector3(0, 1, 0);
+    const q = new THREE.Quaternion();
+    q.setFromUnitVectors(face.normal, up);
+    return q;
+  }
+
+  function rollPhysicalDice(owner, preRolledValues) {
     const isPlayer = owner === 'player';
     dice.forEach((die, i) => {
       die.visible = true; diceShadows[i].visible = true;
-      // Player: camera-right/bottom. Opponent: their right, seen by us at top-left.
       die.position.set(
         isPlayer ? 5.2 + i * .34 : -5.2 - i * .34,
         1.5 + i * .22,
@@ -406,7 +421,7 @@
     return new Promise(resolve => {
       const direction = isPlayer ? 1 : -1;
       diceAnimation = {
-        start: performance.now(), resolve, values: null, revealing: false,
+        start: performance.now(), resolve, values: preRolledValues, revealing: false,
         velocities: [
           new THREE.Vector3(-18 * direction, 27, -16 * direction),
           new THREE.Vector3(-21 * direction, 30, -13 * direction)
@@ -440,20 +455,42 @@
     });
   }
 
+  // Z axis: positive = toward camera/player, negative = away (opponent side).
+  // Card height is 2.18 units. Rows must be separated by at least 2.3 to avoid overlap.
+  //   hand:              z ≈  4.1
+  //   player field row0: z =  1.7,  row1: z = -0.3  (close to player, gaps from hand)
+  //   center divider:    z ≈ -1.5
+  //   opp field row0:    z = -3.2,  row1: z = -5.0  (clearly on opponent side)
+  const PLAYER_FIELD_Z_START =  1.7;
+  const PLAYER_FIELD_Z_STEP  = -2.0;
+  const OPP_FIELD_Z_START    = -3.2;
+  const OPP_FIELD_Z_STEP     = -1.8;
+
   function layoutBattlefield() {
+    const cols = Math.min(5, Math.max(1, battlefield.length));
     battlefield.forEach((card, i) => {
-      const cols = Math.min(5, battlefield.length);
       const row = Math.floor(i / cols), col = i % cols;
       const rowCount = Math.min(cols, battlefield.length - row * cols);
-      card.userData.target.set((col - (rowCount - 1) / 2) * 1.82 - .35, .08 + col * .009, -1.4 + row * 2.45);
+      card.userData.target.set(
+        (col - (rowCount - 1) / 2) * 1.78 - .35,
+        .08 + col * .009,
+        PLAYER_FIELD_Z_START + row * PLAYER_FIELD_Z_STEP
+      );
       card.userData.targetRot = 0;
       card.userData.zone = 'field';
     });
   }
 
   function layoutOpponentBattlefield() {
+    const cols = Math.min(5, Math.max(1, opponentBattlefield.length));
     opponentBattlefield.forEach((card, i) => {
-      card.userData.target.set((i - (opponentBattlefield.length - 1) / 2) * 1.3 - .4, .08 + i * .009, -4.55);
+      const row = Math.floor(i / cols), col = i % cols;
+      const rowCount = Math.min(cols, opponentBattlefield.length - row * cols);
+      card.userData.target.set(
+        (col - (rowCount - 1) / 2) * 1.78 - .4,
+        .08 + col * .009,
+        OPP_FIELD_Z_START + row * OPP_FIELD_Z_STEP
+      );
       card.userData.targetRot = Math.PI;
       card.userData.zone = 'opponent-field';
     });
@@ -481,9 +518,10 @@
       ? new THREE.Vector3(
         THREE.MathUtils.clamp(card.position.x, -5.4, 4.6),
         .08,
-        THREE.MathUtils.clamp(card.position.z, -3.35, 1.35)
+        // Keep card in the player field strip, nudged slightly toward center for dice roll visibility
+        THREE.MathUtils.clamp(card.position.z, -1.0, 2.6)
       )
-      : new THREE.Vector3(-.4, .08, -3.25);
+      : new THREE.Vector3(-.4, .08, -3.2);
     card.userData.zone = 'attack';
     card.userData.target.copy(target);
     card.userData.targetRot = owner === 'player' ? 0 : Math.PI;
@@ -566,8 +604,9 @@
     await stageAttackCard(card, 'player');
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
-    const diceValues = await rollPhysicalDice('player');
-    const roll = diceValues[0] + diceValues[1];
+    const preRolled = [rollD6(), rollD6()];
+    const roll = preRolled[0] + preRolled[1];
+    await rollPhysicalDice('player', preRolled);
     await reportRoll(roll, 'player');
     transition(State.RESOLVING_PLAYER);
     if (roll <= target) {
@@ -601,8 +640,9 @@
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
       transition(State.ROLLING_AI);
       await stageAttackCard(card, 'ai');
-      const diceValues = await rollPhysicalDice('ai');
-      const roll = diceValues[0] + diceValues[1];
+      const preRolled = [rollD6(), rollD6()];
+      const roll = preRolled[0] + preRolled[1];
+      await rollPhysicalDice('ai', preRolled);
       await reportRoll(roll, 'ai');
       transition(State.RESOLVING_AI);
       if (roll <= target) {
@@ -696,7 +736,7 @@
       raycaster.ray.intersectPlane(dragPlane, point);
       if (point) dragging.position.copy(point);
       dragging.rotation.z *= .78;
-      const valid = point.z > -3.55 && point.z < 1.65 && Math.abs(point.x + .4) < 5.7;
+      const valid = point.z > -1.4 && point.z < 2.8 && Math.abs(point.x + .4) < 5.7;
       hint.textContent = valid ? 'RELEASE TO DEPLOY' : 'MOVE ONTO THE BATTLEFIELD';
       hint.classList.add('show');
       renderer.domElement.style.cursor = 'grabbing';
@@ -718,7 +758,7 @@
     if (!dragging) return;
     const card = dragging;
     dragging = null; hint.classList.remove('show');
-    const valid = card.position.z > -3.55 && card.position.z < 1.65 && Math.abs(card.position.x + .4) < 5.7;
+    const valid = card.position.z > -1.4 && card.position.z < 2.8 && Math.abs(card.position.x + .4) < 5.7;
     if (valid) attackCard(card);
     else { hand.push(card); layoutHand(); transition(State.PLAYER_IDLE); }
     renderer.domElement.style.cursor = 'default';
@@ -757,8 +797,9 @@
         if (!animation.revealing) {
           animation.revealing = true;
           animation.revealStart = now;
-          animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
           animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
+          // Target quaternions show the pre-rolled face values upward.
+          animation.targetQuats = animation.values.map(v => quaternionForFaceUp(v));
         }
         const progress = Math.min(1, (now - animation.revealStart) / 720);
         const eased = 1 - Math.pow(1 - progress, 3);
@@ -766,7 +807,7 @@
           const half = die.geometry.parameters.width / 2;
           const revealPosition = new THREE.Vector3(i ? .34 : -.34, -.09 + half, -.45);
           die.position.lerpVectors(animation.from[i].position, revealPosition, eased);
-          die.quaternion.copy(animation.from[i].quaternion);
+          die.quaternion.slerpQuaternions(animation.from[i].quaternion, animation.targetQuats[i], eased);
         });
         if (progress === 1) {
           diceAnimation = null;
@@ -815,7 +856,7 @@
       await document.fonts.ready;
       const [tableTex, atlasTex, chromeTex, backTex, diceTex] = await Promise.all([
         loadTexture('./assets/table.webp'), loadTexture('./assets/cards.webp'),
-        loadTexture('./assets/card-front-chrome.webp'), loadTexture('./assets/card-back.webp'),
+        loadTexture('./assets/card-front-chrome.webp?v=20260712-2'), loadTexture('./assets/card-back.webp?v=20260712-2'),
         loadTexture('./assets/dice-occult-resin.webp')
       ]);
       makeTable(tableTex); makeDeck(backTex); makeDice(diceTex);
