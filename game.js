@@ -106,6 +106,14 @@
 
   const textureLoader = new THREE.TextureLoader();
   const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
+  const dieFaceNormals = [
+    { value: 1, normal: new THREE.Vector3(1, 0, 0) },
+    { value: 6, normal: new THREE.Vector3(-1, 0, 0) },
+    { value: 2, normal: new THREE.Vector3(0, 1, 0) },
+    { value: 5, normal: new THREE.Vector3(0, -1, 0) },
+    { value: 3, normal: new THREE.Vector3(0, 0, 1) },
+    { value: 4, normal: new THREE.Vector3(0, 0, -1) }
+  ];
 
   function makeRoundedCardGeometry(width, height, radius) {
     const halfWidth = width / 2;
@@ -269,13 +277,84 @@
     die.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
   }
 
+  function topFaceValueFromQuaternion(quaternion) {
+    const up = new THREE.Vector3(0, 1, 0);
+    let bestValue = 2;
+    let bestDot = -Infinity;
+    dieFaceNormals.forEach(face => {
+      const dot = face.normal.clone().applyQuaternion(quaternion).dot(up);
+      if (dot > bestDot) { bestDot = dot; bestValue = face.value; }
+    });
+    return bestValue;
+  }
+
+  function bodyLinearSpeed(body, dt) {
+    return body.points.reduce((max, point) => Math.max(max, point.position.distanceTo(point.previous) / dt), 0);
+  }
+
+  function bodyAngularSpeed(currentQuaternions, previousQuaternions, dt) {
+    return currentQuaternions.reduce((max, quaternion, i) => {
+      if (!previousQuaternions[i]) return max;
+      return Math.max(max, previousQuaternions[i].angleTo(quaternion) / dt);
+    }, 0);
+  }
+
+  function isDiceSettled(animation, dt) {
+    const floor = -.09;
+    const currentFaces = animation.bodies.map((body, i) => {
+      const die = dice[i];
+      return topFaceValueFromQuaternion(die.quaternion);
+    });
+    const linearSpeed = Math.max(...animation.bodies.map(body => bodyLinearSpeed(body, dt)));
+    const angularSpeed = bodyAngularSpeed(dice.map(die => die.quaternion), animation.previousQuaternions, dt);
+    const touchingFloor = animation.bodies.some(body => body.points.some(point => point.position.y <= floor + .018));
+    const faceStable = animation.lastFaceValues && animation.lastFaceValues.every((value, i) => value === currentFaces[i]);
+
+    animation.previousQuaternions = dice.map(die => die.quaternion.clone());
+    animation.lastFaceValues = currentFaces;
+
+    return touchingFloor && linearSpeed < .07 && angularSpeed < .5 && faceStable;
+  }
+
+  function applyRollingImpulse(body, dt, floor) {
+    const center = body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / body.points.length);
+    const contactPoints = [];
+    const contactVelocity = new THREE.Vector3();
+    body.points.forEach(point => {
+      if (point.position.y <= floor + .012) {
+        contactPoints.push(point);
+        contactVelocity.add(point.position.clone().sub(point.previous));
+      }
+    });
+    if (!contactPoints.length) return;
+
+    contactVelocity.multiplyScalar(1 / contactPoints.length);
+    contactVelocity.y = 0;
+    const speed = contactVelocity.length();
+    if (speed < .025) return;
+
+    const axis = new THREE.Vector3(contactVelocity.z, 0, -contactVelocity.x);
+    const axisLength = axis.length();
+    if (axisLength < 1e-6) return;
+    axis.multiplyScalar(1 / axisLength);
+
+    const spin = Math.min(.16, speed * dt * 2.2) * Math.min(1, contactPoints.length / 4);
+    if (spin <= 0) return;
+
+    const rotation = new THREE.Quaternion().setFromAxisAngle(axis, spin);
+    body.points.forEach(point => {
+      point.position.sub(center).applyQuaternion(rotation).add(center);
+    });
+  }
+
   function simulateDiceStep(bodies, dt) {
     const floor = -.09;
     // Card scale: 2.18 scene units = 88 mm, so terrestrial gravity is ~243 units/s².
     const gravity = 9.81 * (2.18 / .088);
-    const deskRestitution = .58;
-    const contactFriction = .55;
-    const restFriction = .92;
+    const deskRestitution = .72;
+    const contactFriction = .24;
+    const wallRestitution = .56;
+    const wallFriction = .9;
     bodies.forEach(body => {
       body.points.forEach(point => {
         const velocity = point.position.clone().sub(point.previous).multiplyScalar(.999);
@@ -292,24 +371,37 @@
           a.add(delta); b.sub(delta);
         });
         body.points.forEach(point => {
+          const dx = point.position.x - point.previous.x;
+          const dy = point.position.y - point.previous.y;
+          const dz = point.position.z - point.previous.z;
           if (point.position.y < floor) {
             point.position.y = floor;
-            const vy = point.position.y - point.previous.y;
-            if (vy < 0) {
-              point.previous.y = point.position.y - vy * deskRestitution;
-            }
-            point.previous.x += (point.position.x - point.previous.x) * contactFriction;
-            point.previous.z += (point.position.z - point.previous.z) * contactFriction;
-            const hx = point.position.x - point.previous.x;
-            const hz = point.position.z - point.previous.z;
-            const hSpeed = Math.sqrt(hx * hx + hz * hz);
-            if (hSpeed < .03) {
-              point.previous.x += hx * restFriction;
-              point.previous.z += hz * restFriction;
-            }
+            point.previous.y = point.position.y + dy * deskRestitution;
+            point.previous.x = point.position.x - dx * contactFriction;
+            point.previous.z = point.position.z - dz * contactFriction;
           }
-          point.position.x = THREE.MathUtils.clamp(point.position.x, -8.45, 8.45);
-          point.position.z = THREE.MathUtils.clamp(point.position.z, -7.05, 5.65);
+          if (point.position.x < -8.45) {
+            point.position.x = -8.45;
+            point.previous.x = point.position.x + dx * wallRestitution;
+            point.previous.y = point.position.y - dy * wallFriction;
+            point.previous.z = point.position.z - dz * wallFriction;
+          } else if (point.position.x > 8.45) {
+            point.position.x = 8.45;
+            point.previous.x = point.position.x + dx * wallRestitution;
+            point.previous.y = point.position.y - dy * wallFriction;
+            point.previous.z = point.position.z - dz * wallFriction;
+          }
+          if (point.position.z < -7.05) {
+            point.position.z = -7.05;
+            point.previous.z = point.position.z + dz * wallRestitution;
+            point.previous.x = point.position.x - dx * wallFriction;
+            point.previous.y = point.position.y - dy * wallFriction;
+          } else if (point.position.z > 5.65) {
+            point.position.z = 5.65;
+            point.previous.z = point.position.z + dz * wallRestitution;
+            point.previous.x = point.position.x - dx * wallFriction;
+            point.previous.y = point.position.y - dy * wallFriction;
+          }
         });
       });
       const centers = bodies.map(body => body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / 8));
@@ -319,18 +411,11 @@
         const axis = Math.abs(delta.x) >= Math.abs(delta.z) ? new THREE.Vector3(Math.sign(delta.x) || 1, 0, 0) : new THREE.Vector3(0, 0, Math.sign(delta.z) || 1);
         bodies.forEach((body, i) => body.points.forEach(point => point.position.addScaledVector(axis, (i ? 1 : -1) * overlap * .25)));
       }
+      bodies.forEach(body => applyRollingImpulse(body, dt, floor));
     }
   }
 
-  function resultQuaternion(value) {
-    const rotations = {
-      1: [0,0,Math.PI/2], 6: [0,0,-Math.PI/2], 2: [0,0,0],
-      5: [Math.PI,0,0], 3: [-Math.PI/2,0,0], 4: [Math.PI/2,0,0]
-    };
-    return new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotations[value]));
-  }
-
-  function rollPhysicalDice(values, owner) {
+  function rollPhysicalDice(owner) {
     const isPlayer = owner === 'player';
     dice.forEach((die, i) => {
       die.visible = true; diceShadows[i].visible = true;
@@ -345,7 +430,8 @@
     return new Promise(resolve => {
       const direction = isPlayer ? 1 : -1;
       diceAnimation = {
-        values, start: performance.now(), resolve, settled: false,
+        start: performance.now(), resolve, values: null, stillSince: null,
+        settleFrames: 0, previousQuaternions: dice.map(die => die.quaternion.clone()), lastFaceValues: null,
         velocities: [
           new THREE.Vector3(-18 * direction, 27, -16 * direction),
           new THREE.Vector3(-21 * direction, 30, -13 * direction)
@@ -471,7 +557,6 @@
     transition(State.PLAYER_IDLE);
   }
 
-  const rollDice = () => [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   const cardName = card => CARD_DATA[card.userData.index][0];
   const cardValue = card => CARD_DATA[card.userData.index][1];
 
@@ -489,8 +574,7 @@
     playerTokens -= 1;
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
-    const diceValues = rollDice();
-    await rollPhysicalDice(diceValues, 'player');
+    const diceValues = await rollPhysicalDice('player');
     const roll = diceValues[0] + diceValues[1];
     await reportRoll(roll, 'player');
     transition(State.RESOLVING_PLAYER);
@@ -523,9 +607,8 @@
       opponentTokens -= 1;
       const value = cardValue(card);
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
-      const diceValues = rollDice();
       transition(State.ROLLING_AI);
-      await rollPhysicalDice(diceValues, 'ai');
+      const diceValues = await rollPhysicalDice('ai');
       const roll = diceValues[0] + diceValues[1];
       await reportRoll(roll, 'ai');
       transition(State.RESOLVING_AI);
@@ -633,29 +716,24 @@
     });
     if (diceAnimation) {
       const animation = diceAnimation;
-      const elapsed = (now - animation.start) / 1000;
       const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
-      if (elapsed < 3.3) {
-        animation.accumulator += dt;
-        const fixedStep = 1 / 120;
-        while (animation.accumulator >= fixedStep) {
-          simulateDiceStep(animation.bodies, fixedStep);
-          animation.accumulator -= fixedStep;
-        }
-        dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
-      } else {
-        if (!animation.settled) {
-          animation.settled = true; animation.settleStart = now;
-          animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
-        }
-        const p = Math.min(1, (now - animation.settleStart) / 620);
-        const eased = 1 - Math.pow(1 - p, 3);
-        dice.forEach((die, i) => {
-          const half = die.geometry.parameters.width / 2;
-          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .3 : -.3, -.09 + half, -.45), eased);
-          die.quaternion.slerpQuaternions(animation.from[i].quaternion, resultQuaternion(animation.values[i]), eased);
-        });
-        if (p === 1) { diceAnimation = null; animation.resolve(); }
+      animation.accumulator += dt;
+      const fixedStep = 1 / 120;
+      while (animation.accumulator >= fixedStep) {
+        simulateDiceStep(animation.bodies, fixedStep);
+        animation.accumulator -= fixedStep;
+      }
+      dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
+      const settled = isDiceSettled(animation, fixedStep);
+      animation.settleFrames = settled ? animation.settleFrames + 1 : 0;
+      if (animation.settleFrames >= 14) {
+        animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
+        diceAnimation = null;
+        animation.resolve(animation.values);
+      } else if ((now - animation.start) / 1000 > 9) {
+        animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
+        diceAnimation = null;
+        animation.resolve(animation.values);
       }
       diceShadows.forEach((shadow, i) => {
         shadow.position.x = dice[i].position.x; shadow.position.z = dice[i].position.z;
