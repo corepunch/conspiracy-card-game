@@ -589,9 +589,9 @@
     try {
       await document.fonts.ready;
       const [tableTex, atlasTex, chromeTex, backTex, diceTex] = await Promise.all([
-        loadTexture('./assets/table.png'), loadTexture('./assets/cards.png'),
-        loadTexture('./assets/card-front-chrome.png'), loadTexture('./assets/card-back.png'),
-        loadTexture('./assets/dice-occult-resin.png')
+        loadTexture('./assets/table.webp'), loadTexture('./assets/cards.webp'),
+        loadTexture('./assets/card-front-chrome.webp'), loadTexture('./assets/card-back.webp'),
+        loadTexture('./assets/dice-occult-resin.webp')
       ]);
       makeTable(tableTex); makeDeck(backTex); makeDice(diceTex);
       const atlas = atlasTex.image, chrome = chromeTex.image;
