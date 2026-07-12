@@ -294,11 +294,12 @@
         body.points.forEach(point => {
           if (point.position.y < floor) {
             point.position.y = floor;
+            const vy = point.position.y - point.previous.y;
+            if (vy < 0) {
+              point.previous.y = point.position.y - vy * deskRestitution;
+            }
             point.previous.x += (point.position.x - point.previous.x) * contactFriction;
             point.previous.z += (point.position.z - point.previous.z) * contactFriction;
-            if (point.previous.y > floor) {
-              point.previous.y = floor - (point.previous.y - floor) * deskRestitution;
-            }
             const hx = point.position.x - point.previous.x;
             const hz = point.position.z - point.previous.z;
             const hSpeed = Math.sqrt(hx * hx + hz * hz);
