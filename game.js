@@ -51,6 +51,8 @@
   const key = new THREE.DirectionalLight(0xffd68c, 2.1);
   key.position.set(-4, 9, 5);
   key.castShadow = true;
+  key.shadow.bias = -0.0005;
+  key.shadow.normalBias = 0.02;
   key.shadow.mapSize.set(1024, 1024);
   scene.add(key);
 
