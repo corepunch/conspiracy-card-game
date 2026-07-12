@@ -288,34 +288,6 @@
     return bestValue;
   }
 
-  function bodyLinearSpeed(body, dt) {
-    return body.points.reduce((max, point) => Math.max(max, point.position.distanceTo(point.previous) / dt), 0);
-  }
-
-  function bodyAngularSpeed(currentQuaternions, previousQuaternions, dt) {
-    return currentQuaternions.reduce((max, quaternion, i) => {
-      if (!previousQuaternions[i]) return max;
-      return Math.max(max, previousQuaternions[i].angleTo(quaternion) / dt);
-    }, 0);
-  }
-
-  function isDiceSettled(animation, dt) {
-    const floor = -.09;
-    const currentFaces = animation.bodies.map((body, i) => {
-      const die = dice[i];
-      return topFaceValueFromQuaternion(die.quaternion);
-    });
-    const linearSpeed = Math.max(...animation.bodies.map(body => bodyLinearSpeed(body, dt)));
-    const angularSpeed = bodyAngularSpeed(dice.map(die => die.quaternion), animation.previousQuaternions, dt);
-    const touchingFloor = animation.bodies.some(body => body.points.some(point => point.position.y <= floor + .018));
-    const faceStable = animation.lastFaceValues && animation.lastFaceValues.every((value, i) => value === currentFaces[i]);
-
-    animation.previousQuaternions = dice.map(die => die.quaternion.clone());
-    animation.lastFaceValues = currentFaces;
-
-    return touchingFloor && linearSpeed < .07 && angularSpeed < .5 && faceStable;
-  }
-
   function applyRollingImpulse(body, dt, floor) {
     const center = body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / body.points.length);
     const contactPoints = [];
@@ -430,8 +402,7 @@
     return new Promise(resolve => {
       const direction = isPlayer ? 1 : -1;
       diceAnimation = {
-        start: performance.now(), resolve, values: null, stillSince: null,
-        settleFrames: 0, previousQuaternions: dice.map(die => die.quaternion.clone()), lastFaceValues: null,
+        start: performance.now(), resolve, values: null, revealing: false,
         velocities: [
           new THREE.Vector3(-18 * direction, 27, -16 * direction),
           new THREE.Vector3(-21 * direction, 30, -13 * direction)
@@ -499,6 +470,21 @@
         start: performance.now(), duration, resolve
       });
     });
+  }
+
+  function stageAttackCard(card, owner) {
+    const target = owner === 'player'
+      ? new THREE.Vector3(
+        THREE.MathUtils.clamp(card.position.x, -5.4, 4.6),
+        .08,
+        THREE.MathUtils.clamp(card.position.z, -3.35, 1.35)
+      )
+      : new THREE.Vector3(-.4, .08, -3.25);
+    card.userData.zone = 'attack';
+    card.userData.target.copy(target);
+    card.userData.targetRot = owner === 'player' ? 0 : Math.PI;
+    card.renderOrder = 20;
+    return moveCard(card, target, card.userData.targetRot, 260);
   }
 
   async function discardCard(card) {
@@ -572,6 +558,7 @@
   async function attackCard(card) {
     transition(State.ROLLING_PLAYER);
     playerTokens -= 1;
+    await stageAttackCard(card, 'player');
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
     const diceValues = await rollPhysicalDice('player');
@@ -608,6 +595,7 @@
       const value = cardValue(card);
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
       transition(State.ROLLING_AI);
+      await stageAttackCard(card, 'ai');
       const diceValues = await rollPhysicalDice('ai');
       const roll = diceValues[0] + diceValues[1];
       await reportRoll(roll, 'ai');
@@ -716,24 +704,35 @@
     });
     if (diceAnimation) {
       const animation = diceAnimation;
+      const elapsed = (now - animation.start) / 1000;
       const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
-      animation.accumulator += dt;
-      const fixedStep = 1 / 120;
-      while (animation.accumulator >= fixedStep) {
-        simulateDiceStep(animation.bodies, fixedStep);
-        animation.accumulator -= fixedStep;
-      }
-      dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
-      const settled = isDiceSettled(animation, fixedStep);
-      animation.settleFrames = settled ? animation.settleFrames + 1 : 0;
-      if (animation.settleFrames >= 14) {
-        animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
-        diceAnimation = null;
-        animation.resolve(animation.values);
-      } else if ((now - animation.start) / 1000 > 9) {
-        animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
-        diceAnimation = null;
-        animation.resolve(animation.values);
+      if (elapsed < 3.3) {
+        animation.accumulator += dt;
+        const fixedStep = 1 / 120;
+        while (animation.accumulator >= fixedStep) {
+          simulateDiceStep(animation.bodies, fixedStep);
+          animation.accumulator -= fixedStep;
+        }
+        dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
+      } else {
+        if (!animation.revealing) {
+          animation.revealing = true;
+          animation.revealStart = now;
+          animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
+          animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
+        }
+        const progress = Math.min(1, (now - animation.revealStart) / 720);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        dice.forEach((die, i) => {
+          const half = die.geometry.parameters.width / 2;
+          const revealPosition = new THREE.Vector3(i ? .34 : -.34, -.09 + half, -.45);
+          die.position.lerpVectors(animation.from[i].position, revealPosition, eased);
+          die.quaternion.copy(animation.from[i].quaternion);
+        });
+        if (progress === 1) {
+          diceAnimation = null;
+          animation.resolve(animation.values);
+        }
       }
       diceShadows.forEach((shadow, i) => {
         shadow.position.x = dice[i].position.x; shadow.position.z = dice[i].position.z;
