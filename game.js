@@ -785,7 +785,7 @@
       const animation = diceAnimation;
       const elapsed = (now - animation.start) / 1000;
       const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
-      if (elapsed < 3.3) {
+      if (elapsed < 1.3) {
         animation.accumulator += dt;
         const fixedStep = 1 / 120;
         while (animation.accumulator >= fixedStep) {
@@ -796,18 +796,16 @@
       } else {
         if (!animation.revealing) {
           animation.revealing = true;
-          animation.revealStart = now;
+          animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
           animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
-          // Target quaternions show the pre-rolled face values upward.
-          animation.targetQuats = animation.values.map(v => quaternionForFaceUp(v));
         }
-        const progress = Math.min(1, (now - animation.revealStart) / 720);
+        if (!animation.settleStart) animation.settleStart = now;
+        const progress = Math.min(1, (now - animation.settleStart) / 620);
         const eased = 1 - Math.pow(1 - progress, 3);
         dice.forEach((die, i) => {
           const half = die.geometry.parameters.width / 2;
-          const revealPosition = new THREE.Vector3(i ? .34 : -.34, -.09 + half, -.45);
-          die.position.lerpVectors(animation.from[i].position, revealPosition, eased);
-          die.quaternion.slerpQuaternions(animation.from[i].quaternion, animation.targetQuats[i], eased);
+          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .34 : -.34, -.09 + half, -.45), eased);
+          die.quaternion.copy(animation.from[i].quaternion);
         });
         if (progress === 1) {
           diceAnimation = null;
