@@ -274,7 +274,8 @@
     // Card scale: 2.18 scene units = 88 mm, so terrestrial gravity is ~243 units/s².
     const gravity = 9.81 * (2.18 / .088);
     const deskRestitution = .58;
-    const contactFriction = .08;
+    const contactFriction = .55;
+    const restFriction = .92;
     bodies.forEach(body => {
       body.points.forEach(point => {
         const velocity = point.position.clone().sub(point.previous).multiplyScalar(.999);
@@ -297,6 +298,13 @@
             point.previous.z += (point.position.z - point.previous.z) * contactFriction;
             if (point.previous.y > floor) {
               point.previous.y = floor - (point.previous.y - floor) * deskRestitution;
+            }
+            const hx = point.position.x - point.previous.x;
+            const hz = point.position.z - point.previous.z;
+            const hSpeed = Math.sqrt(hx * hx + hz * hz);
+            if (hSpeed < .03) {
+              point.previous.x += hx * restFriction;
+              point.previous.z += hz * restFriction;
             }
           }
           point.position.x = THREE.MathUtils.clamp(point.position.x, -8.45, 8.45);
