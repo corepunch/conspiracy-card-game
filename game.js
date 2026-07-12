@@ -15,6 +15,7 @@
   const opponentTokensLabel = document.getElementById('opponent-tokens');
   const playerGroupsLabel = document.getElementById('player-groups');
   const opponentGroupsLabel = document.getElementById('opponent-groups');
+  const rollResult = document.getElementById('roll-result');
 
   if (!window.THREE) {
     loading.classList.add('failed');
@@ -69,16 +70,22 @@
   const motions = new Map();
   const State = Object.freeze({
     SETUP: 'setup', PLAYER_IDLE: 'playerIdle', PLAYER_DRAGGING: 'playerDragging',
+    ROLLING_PLAYER: 'rollingPlayer', REPORTING_PLAYER: 'reportingPlayer',
     RESOLVING_PLAYER: 'resolvingPlayer', PLAYER_DONE: 'playerDone',
-    AI_THINKING: 'aiThinking', RESOLVING_AI: 'resolvingAi', GAME_OVER: 'gameOver'
+    AI_THINKING: 'aiThinking', ROLLING_AI: 'rollingAi', REPORTING_AI: 'reportingAi',
+    RESOLVING_AI: 'resolvingAi', GAME_OVER: 'gameOver'
   });
   const allowedTransitions = {
     [State.SETUP]: [State.PLAYER_IDLE],
     [State.PLAYER_IDLE]: [State.PLAYER_DRAGGING, State.AI_THINKING, State.GAME_OVER],
-    [State.PLAYER_DRAGGING]: [State.PLAYER_IDLE, State.RESOLVING_PLAYER],
+    [State.PLAYER_DRAGGING]: [State.PLAYER_IDLE, State.ROLLING_PLAYER],
+    [State.ROLLING_PLAYER]: [State.REPORTING_PLAYER],
+    [State.REPORTING_PLAYER]: [State.RESOLVING_PLAYER],
     [State.RESOLVING_PLAYER]: [State.PLAYER_DONE, State.GAME_OVER],
     [State.PLAYER_DONE]: [State.AI_THINKING, State.GAME_OVER],
-    [State.AI_THINKING]: [State.RESOLVING_AI, State.PLAYER_IDLE, State.GAME_OVER],
+    [State.AI_THINKING]: [State.ROLLING_AI, State.PLAYER_IDLE, State.GAME_OVER],
+    [State.ROLLING_AI]: [State.REPORTING_AI],
+    [State.REPORTING_AI]: [State.RESOLVING_AI],
     [State.RESOLVING_AI]: [State.PLAYER_IDLE, State.GAME_OVER],
     [State.GAME_OVER]: []
   };
@@ -87,6 +94,8 @@
   let hovered = null;
   let cardZoom = 0;
   let table, deckTop;
+  let dice = [];
+  let diceAnimation = null;
   let archiveCount = 0;
   let playerTokens = 10;
   let opponentTokens = 10;
@@ -195,6 +204,64 @@
     }
   }
 
+  function makeDieFaceTexture(baseImage, value) {
+    const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(baseImage, 0, 0, 256, 256);
+    const positions = {
+      1: [[.5,.5]], 2: [[.3,.3],[.7,.7]], 3: [[.3,.3],[.5,.5],[.7,.7]],
+      4: [[.3,.3],[.7,.3],[.3,.7],[.7,.7]],
+      5: [[.3,.3],[.7,.3],[.5,.5],[.3,.7],[.7,.7]],
+      6: [[.3,.25],[.7,.25],[.3,.5],[.7,.5],[.3,.75],[.7,.75]]
+    };
+    ctx.shadowColor = '#000'; ctx.shadowBlur = 9; ctx.fillStyle = '#e0b45c';
+    positions[value].forEach(([x,y]) => { ctx.beginPath(); ctx.arc(x * 256, y * 256, 20, 0, Math.PI * 2); ctx.fill(); });
+    return canvasTexture(canvas);
+  }
+
+  function makeDice(baseTexture) {
+    const valuesByFace = [1, 6, 2, 5, 3, 4];
+    const materials = valuesByFace.map(value => new THREE.MeshStandardMaterial({
+      map: makeDieFaceTexture(baseTexture.image, value), roughness: .48, metalness: .12
+    }));
+    const geometry = new THREE.BoxGeometry(1.05, 1.05, 1.05, 3, 3, 3);
+    dice = [-1, 1].map((side, i) => {
+      const die = new THREE.Mesh(geometry, materials); die.visible = false;
+      die.castShadow = true; die.receiveShadow = true; die.renderOrder = 200 + i;
+      scene.add(die); return die;
+    });
+  }
+
+  function resultQuaternion(value) {
+    const rotations = {
+      1: [0,0,Math.PI/2], 6: [0,0,-Math.PI/2], 2: [0,0,0],
+      5: [Math.PI,0,0], 3: [-Math.PI/2,0,0], 4: [Math.PI/2,0,0]
+    };
+    return new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotations[value]));
+  }
+
+  function rollPhysicalDice(values) {
+    dice.forEach((die, i) => {
+      die.visible = true; die.position.set(i ? .55 : -.55, 3.5 + i * .35, 1.25);
+      die.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+    });
+    return new Promise(resolve => {
+      diceAnimation = {
+        values, start: performance.now(), resolve, settled: false,
+        velocities: [new THREE.Vector3(-1.35, 4.8, -2.1), new THREE.Vector3(1.25, 5.3, -2.35)],
+        angular: [new THREE.Vector3(8.7, 11.4, 7.1), new THREE.Vector3(-10.2, 8.9, 12.3)], last: performance.now()
+      };
+    });
+  }
+
+  async function reportRoll(total, owner) {
+    transition(owner === 'player' ? State.REPORTING_PLAYER : State.REPORTING_AI);
+    rollResult.querySelector('strong').textContent = total;
+    rollResult.classList.add('show');
+    await new Promise(resolve => setTimeout(resolve, 520));
+    rollResult.classList.remove('show');
+    dice.forEach(die => { die.visible = false; });
+  }
+
   function layoutHand() {
     const count = hand.length;
     const spacing = Math.min(1.18, 7.1 / Math.max(count - 1, 1));
@@ -265,6 +332,8 @@
     const status = state === State.GAME_OVER ? 'GAME OVER'
       : state === State.PLAYER_IDLE || state === State.PLAYER_DRAGGING ? 'YOUR TURN · 1 ATTACK'
         : state === State.PLAYER_DONE ? 'YOUR TURN · ATTACK USED'
+          : [State.ROLLING_PLAYER, State.ROLLING_AI].includes(state) ? 'ROLLING DICE'
+            : [State.REPORTING_PLAYER, State.REPORTING_AI].includes(state) ? 'DICE RESULT'
           : state === State.RESOLVING_PLAYER ? 'RESOLVING ATTACK'
             : 'THE CABAL IS ACTING';
     turnStatus.innerHTML = `<span class="turn-dot"></span>${status}`;
@@ -297,7 +366,7 @@
     transition(State.PLAYER_IDLE);
   }
 
-  const rollDice = () => 2 + Math.floor(Math.random() * 6) + Math.floor(Math.random() * 6);
+  const rollDice = () => [1 + Math.floor(Math.random() * 6), 1 + Math.floor(Math.random() * 6)];
   const cardName = card => CARD_DATA[card.userData.index][0];
   const cardValue = card => CARD_DATA[card.userData.index][1];
 
@@ -311,11 +380,15 @@
   }
 
   async function attackCard(card) {
-    transition(State.RESOLVING_PLAYER);
+    transition(State.ROLLING_PLAYER);
     playerTokens -= 1;
     const power = Math.max(2, ...battlefield.map(cardValue));
     const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
-    const roll = rollDice();
+    const diceValues = rollDice();
+    await rollPhysicalDice(diceValues);
+    const roll = diceValues[0] + diceValues[1];
+    await reportRoll(roll, 'player');
+    transition(State.RESOLVING_PLAYER);
     if (roll <= target) {
       battlefield.push(card);
       eventLog.textContent = `${cardName(card)} controlled: rolled ${roll}, needed ${target} or less.`;
@@ -341,12 +414,16 @@
     opponentTokens += 2 + Math.floor((opponentGroupCount - 1) / 3);
     const card = deck.pop();
     if (card && opponentTokens > 0) {
-      transition(State.RESOLVING_AI);
       card.visible = true; card.position.copy(deckTop.position); card.position.y = .4;
       opponentTokens -= 1;
       const value = cardValue(card);
       const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
-      const roll = rollDice();
+      const diceValues = rollDice();
+      transition(State.ROLLING_AI);
+      await rollPhysicalDice(diceValues);
+      const roll = diceValues[0] + diceValues[1];
+      await reportRoll(roll, 'ai');
+      transition(State.RESOLVING_AI);
       if (roll <= target) {
         opponentGroupCount += 1; opponentPower = Math.max(opponentPower, value);
         eventLog.textContent = `The Cabal controls ${cardName(card)} (rolled ${roll} vs ${target}).`;
@@ -449,6 +526,37 @@
       card.quaternion.slerpQuaternions(motion.fromQuat, motion.toQuat, eased);
       if (progress === 1) { motions.delete(card); motion.resolve(); }
     });
+    if (diceAnimation) {
+      const animation = diceAnimation;
+      const elapsed = (now - animation.start) / 1000;
+      const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
+      if (elapsed < 1.65) {
+        dice.forEach((die, i) => {
+          animation.velocities[i].y -= 12.5 * dt;
+          die.position.addScaledVector(animation.velocities[i], dt);
+          die.rotation.x += animation.angular[i].x * dt;
+          die.rotation.y += animation.angular[i].y * dt;
+          die.rotation.z += animation.angular[i].z * dt;
+          if (die.position.y < .62) {
+            die.position.y = .62; animation.velocities[i].y = Math.abs(animation.velocities[i].y) * .46;
+            animation.velocities[i].x *= .78; animation.velocities[i].z *= .78;
+            animation.angular[i].multiplyScalar(.82);
+          }
+        });
+      } else {
+        if (!animation.settled) {
+          animation.settled = true; animation.settleStart = now;
+          animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
+        }
+        const p = Math.min(1, (now - animation.settleStart) / 380);
+        const eased = 1 - Math.pow(1 - p, 3);
+        dice.forEach((die, i) => {
+          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .68 : -.68, .62, -.45), eased);
+          die.quaternion.slerpQuaternions(animation.from[i].quaternion, resultQuaternion(animation.values[i]), eased);
+        });
+        if (p === 1) { diceAnimation = null; animation.resolve(); }
+      }
+    }
     [...hand, ...battlefield, ...archive, ...opponentBattlefield].forEach(card => {
       if (card === dragging || motions.has(card)) return;
       const isHovered = card === hovered;
@@ -480,11 +588,12 @@
   async function init() {
     try {
       await document.fonts.ready;
-      const [tableTex, atlasTex, chromeTex, backTex] = await Promise.all([
-        loadTexture('./table.png'), loadTexture('./cards.png'),
-        loadTexture('./card-front-chrome.png'), loadTexture('./card-back.png')
+      const [tableTex, atlasTex, chromeTex, backTex, diceTex] = await Promise.all([
+        loadTexture('./assets/table.png'), loadTexture('./assets/cards.png'),
+        loadTexture('./assets/card-front-chrome.png'), loadTexture('./assets/card-back.png'),
+        loadTexture('./assets/dice-occult-resin.png')
       ]);
-      makeTable(tableTex); makeDeck(backTex);
+      makeTable(tableTex); makeDeck(backTex); makeDice(diceTex);
       const atlas = atlasTex.image, chrome = chromeTex.image;
       const textures = CARD_DATA.map((_, i) => makeCardTexture(i, atlas, chrome));
       const cards = textures.map((texture, i) => createCard(i, texture));

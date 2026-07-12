@@ -32,11 +32,13 @@ Drag a dossier from your hand onto the highlighted battlefield.
 - A control attempt costs **1 Influence**.
 - Use the highest printed value among your controlled groups as your Power; your starting organization has Power 2.
 - Calculate the target number as `7 + your Power − target value`, limited to the range 2–10.
-- The game rolls two six-sided dice. If the total is at or below the target number, you control the group and add it to your field.
+- The game rolls two physical six-sided dice across the table. After they settle, a large total is reported. If that total is at or below the target number, you control the group and add it to your field.
 - On failure, the dossier goes to the Archive discard pile.
 - You may make only one attempt per turn.
 
 A failed attempt still uses your one attempt for the turn. After its card finishes moving face-up to the Archive pile beside the deck, **Finish Turn** is therefore the only remaining turn action. This is intentional; you may inspect the table before finishing.
+
+Dice rolling, result reporting, and card movement are separate locked phases. Wait for the brief 2–3 second sequence to finish before the next control becomes available.
 
 This means powerful high-value dossiers are useful once controlled, but are harder to acquire.
 
