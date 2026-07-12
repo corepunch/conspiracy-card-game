@@ -8,6 +8,13 @@
   const deckLabel = document.getElementById('deck-label');
   const archiveLabel = document.getElementById('grave-label');
   const hint = document.getElementById('hint');
+  const turnStatus = document.getElementById('turn-status');
+  const finishTurnButton = document.getElementById('finish-turn');
+  const eventLog = document.getElementById('event-log');
+  const playerTokensLabel = document.getElementById('player-tokens');
+  const opponentTokensLabel = document.getElementById('opponent-tokens');
+  const playerGroupsLabel = document.getElementById('player-groups');
+  const opponentGroupsLabel = document.getElementById('opponent-groups');
 
   if (!window.THREE) {
     loading.classList.add('failed');
@@ -62,6 +69,14 @@
   let hovered = null;
   let cardZoom = 0;
   let table, deckTop;
+  let archiveCount = 0;
+  let playerTokens = 10;
+  let opponentTokens = 10;
+  let opponentGroupCount = 1;
+  let opponentPower = 2;
+  let playerTurn = true;
+  let attackUsed = false;
+  let gameOver = false;
 
   const textureLoader = new THREE.TextureLoader();
   const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
@@ -189,8 +204,15 @@
 
   function updateLabels() {
     deckLabel.querySelector('b').textContent = deck.length;
-    archiveLabel.querySelector('b').textContent = '0';
+    archiveLabel.querySelector('b').textContent = archiveCount;
     deckLabel.style.opacity = deck.length ? '1' : '.35';
+    playerTokensLabel.innerHTML = `<span>◆</span>${playerTokens}`;
+    opponentTokensLabel.innerHTML = `<span>◆</span>${opponentTokens}`;
+    const playerGroupCount = battlefield.length + 1;
+    playerGroupsLabel.textContent = `${playerGroupCount} ${playerGroupCount === 1 ? 'group' : 'groups'}`;
+    opponentGroupsLabel.textContent = `${opponentGroupCount} ${opponentGroupCount === 1 ? 'group' : 'groups'}`;
+    turnStatus.innerHTML = `<span class="turn-dot"></span>${gameOver ? 'GAME OVER' : playerTurn ? `YOUR TURN · ${attackUsed ? 'ATTACK USED' : '1 ATTACK'}` : 'THE CABAL IS ACTING'}`;
+    finishTurnButton.disabled = !playerTurn || gameOver;
   }
 
   function drawCard() {
@@ -209,8 +231,74 @@
     battlefield.splice(0).forEach(c => { c.visible = false; });
     deck = [...cards].sort(() => Math.random() - .5);
     deck.forEach(c => { c.visible = false; c.userData.zone = 'deck'; });
-    for (let i = 0; i < 6; i++) drawCard();
+    archiveCount = 0; playerTokens = 10; opponentTokens = 10;
+    opponentGroupCount = 1; opponentPower = 2; playerTurn = true;
+    attackUsed = false; gameOver = false;
+    for (let i = 0; i < 5; i++) drawCard();
+    eventLog.textContent = 'Build your power structure. Drag one dossier into the field to attack it.';
     updateLabels();
+  }
+
+  const rollDice = () => 2 + Math.floor(Math.random() * 6) + Math.floor(Math.random() * 6);
+  const cardName = card => CARD_DATA[card.userData.index][0];
+  const cardValue = card => CARD_DATA[card.userData.index][1];
+
+  function checkVictory() {
+    if (battlefield.length + 1 >= 7) {
+      gameOver = true; eventLog.textContent = 'WORLD CONTROLLED — the Illuminati win.';
+    } else if (opponentGroupCount >= 7) {
+      gameOver = true; eventLog.textContent = 'THE CABAL CONTROLS THE WORLD. Press R to try again.';
+    }
+    updateLabels();
+  }
+
+  function attackCard(card) {
+    if (!playerTurn || attackUsed || playerTokens < 1 || gameOver) return false;
+    playerTokens -= 1; attackUsed = true;
+    const power = Math.max(2, ...battlefield.map(cardValue));
+    const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
+    const roll = rollDice();
+    if (roll <= target) {
+      battlefield.push(card);
+      eventLog.textContent = `${cardName(card)} controlled: rolled ${roll}, needed ${target} or less.`;
+      layoutBattlefield();
+    } else {
+      card.visible = false; card.userData.zone = 'archive'; archiveCount += 1;
+      eventLog.textContent = `${cardName(card)} resisted: rolled ${roll}, needed ${target} or less.`;
+    }
+    updateLabels(); checkVictory();
+    return true;
+  }
+
+  function finishTurn() {
+    if (!playerTurn || gameOver) return;
+    playerTurn = false; updateLabels();
+    eventLog.textContent = 'The Cabal considers its target…';
+    setTimeout(runAiTurn, 650);
+  }
+
+  function runAiTurn() {
+    if (gameOver) return;
+    opponentTokens += 2 + Math.floor((opponentGroupCount - 1) / 3);
+    const card = deck.pop();
+    if (card && opponentTokens > 0) {
+      opponentTokens -= 1;
+      const value = cardValue(card);
+      const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
+      const roll = rollDice();
+      if (roll <= target) {
+        opponentGroupCount += 1; opponentPower = Math.max(opponentPower, value);
+        eventLog.textContent = `The Cabal controls ${cardName(card)} (rolled ${roll} vs ${target}).`;
+      } else {
+        archiveCount += 1;
+        eventLog.textContent = `The Cabal failed to control ${cardName(card)} (rolled ${roll} vs ${target}).`;
+      }
+      card.visible = false; card.userData.zone = 'archive';
+    } else eventLog.textContent = 'The Cabal passes.';
+    checkVictory();
+    if (gameOver) return;
+    playerTokens += 2 + Math.floor(battlefield.length / 3);
+    playerTurn = true; attackUsed = false; drawCard(); updateLabels();
   }
 
   function setPointer(event) {
@@ -237,7 +325,7 @@
   function onPointerDown(event) {
     setPointer(event);
     const deckHit = deckTop && raycaster.intersectObject(deckTop, false)[0];
-    if (deckHit) { drawCard(); return; }
+    if (deckHit) return;
     const hit = handCardHits()[0];
     if (!hit) return;
     setHovered(null);
@@ -280,7 +368,7 @@
     const card = dragging;
     dragging = null; hint.classList.remove('show');
     const valid = card.position.z > -3.55 && card.position.z < 1.65 && Math.abs(card.position.x + .4) < 5.7;
-    if (valid) { battlefield.push(card); layoutBattlefield(); }
+    if (valid && attackCard(card)) { /* resolved by the control attempt */ }
     else { hand.push(card); layoutHand(); }
     renderer.domElement.style.cursor = 'default';
     renderer.domElement.releasePointerCapture?.(event.pointerId);
@@ -346,7 +434,6 @@
   });
   renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
   addEventListener('keydown', event => {
-    if (event.key.toLowerCase() === 'd') drawCard();
     if (event.key.toLowerCase() === 'r') location.reload();
   });
   addEventListener('resize', () => {
@@ -356,6 +443,7 @@
   const help = document.getElementById('help');
   document.getElementById('settings').onclick = () => { help.hidden = !help.hidden; };
   document.getElementById('close-help').onclick = () => { help.hidden = true; };
+  finishTurnButton.onclick = finishTurn;
 
   init(); animate();
 })();
