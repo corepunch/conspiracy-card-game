@@ -157,28 +157,48 @@
     do { ctx.font = `600 ${size--}px Crimson`; } while (ctx.measureText(title).width > maxWidth && size > 23);
   }
 
+  const CARD_ATLAS_COLUMNS = 16;
+
   function makeCardTexture(index, atlas, chrome) {
     const canvas = document.createElement('canvas');
     canvas.width = 636; canvas.height = 888;
     const ctx = canvas.getContext('2d');
-    const cellW = atlas.width / 8, cellH = atlas.height / 8;
-    const col = index % 8, row = Math.floor(index / 8);
+    const cellW = atlas.width / CARD_ATLAS_COLUMNS;
+    const cellH = atlas.height / CARD_ATLAS_COLUMNS;
+    const col = index % CARD_ATLAS_COLUMNS;
+    const row = Math.floor(index / CARD_ATLAS_COLUMNS);
     const cropH = cellW * 117 / 142;
     ctx.fillStyle = '#d7ccb0'; ctx.fillRect(0, 0, canvas.width, canvas.height);
     // Bleed the artwork just beyond the chrome's transparent window so texture
     // filtering cannot reveal the card-colored canvas along its inner edge.
     ctx.drawImage(atlas, col * cellW, row * cellH + (cellH - cropH) / 2, cellW, cropH, 30, 29, 575, 473);
     ctx.drawImage(chrome, 0, 0, canvas.width, canvas.height);
-    const [title, value] = CARD_DATA[index];
+    const [name, type, cost, , , keyword, abilityText, flavor] = CARD_DATA[index];
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#eee8d7';
-    fitTitle(ctx, title, 532); ctx.fillText(title, 318, 533);
+    fitTitle(ctx, name, 532); ctx.fillText(name, 318, 533);
     ctx.font = '32px Cardo'; ctx.textAlign = 'left'; ctx.fillStyle = '#29251e';
-    ctx.fillText('Conspiracy  •  Dossier', 52, 600);
+    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+    const typeLine = keyword ? `${typeLabel}  •  ${keyword}` : typeLabel;
+    ctx.fillText(typeLine, 52, 600);
     ctx.font = '29px Crimson';
-    const copy = ['Uncover the hidden connection.', 'Deploy this dossier to the field', 'to advance your investigation.'];
-    copy.forEach((line, i) => ctx.fillText(line, 52, 659 + i * 38));
+    const bodyText = abilityText || flavor || '';
+    const words = bodyText.split(' ');
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const test = line ? line + ' ' + word : word;
+      if (ctx.measureText(test).width > 532 && line) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = test;
+      }
+      if (lines.length >= 3) break;
+    }
+    if (line && lines.length < 3) lines.push(line);
+    lines.forEach((line, i) => ctx.fillText(line, 52, 659 + i * 38));
     ctx.fillStyle = '#29251e'; ctx.textAlign = 'center'; ctx.font = 'bold 44px Cardo';
-    ctx.fillText(String(value), 557, 817);
+    ctx.fillText(String(cost), 557, 817);
     return canvasTexture(canvas);
   }
 
@@ -589,7 +609,7 @@
   }
 
   const cardName = card => CARD_DATA[card.userData.index][0];
-  const cardValue = card => CARD_DATA[card.userData.index][1];
+  const cardValue = card => CARD_DATA[card.userData.index][2];
 
   function checkVictory() {
     if (battlefield.length + 1 >= 7) {
@@ -855,7 +875,7 @@
     try {
       await document.fonts.ready;
       const [tableTex, atlasTex, chromeTex, backTex, diceTex] = await Promise.all([
-        loadTexture('./assets/table.webp'), loadTexture('./assets/cards.webp'),
+        loadTexture('./assets/table.webp'), loadTexture('./assets/cards.webp?v=20260716-1'),
         loadTexture('./assets/card-front-chrome.webp?v=20260712-2'), loadTexture('./assets/card-back.webp?v=20260712-2'),
         loadTexture('./assets/dice-occult-resin.webp')
       ]);
