@@ -1,42 +1,52 @@
-/* global THREE, CARD_DATA */
+/* global THREE, CARD_DATA, ArchiveCore, ArchiveAI */
+// The Hidden Archive — Three.js table (imperative shell).
+// All rules live in core.js; this file renders the engine state, turns pointer
+// input into engine actions, rolls the physical dice and runs the AI's turn.
 (() => {
   'use strict';
 
-  const root = document.getElementById('game');
-  const loading = document.getElementById('loading');
-  const loadingMessage = document.getElementById('loading-message');
-  const deckLabel = document.getElementById('deck-label');
-  const archiveLabel = document.getElementById('grave-label');
-  const hint = document.getElementById('hint');
-  const turnStatus = document.getElementById('turn-status');
-  const finishTurnButton = document.getElementById('finish-turn');
-  const eventLog = document.getElementById('event-log');
-  const playerTokensLabel = document.getElementById('player-tokens');
-  const opponentTokensLabel = document.getElementById('opponent-tokens');
-  const playerGroupsLabel = document.getElementById('player-groups');
-  const opponentGroupsLabel = document.getElementById('opponent-groups');
-  const rollResult = document.getElementById('roll-result');
+  const $ = id => document.getElementById(id);
+  const root = $('game');
+  const loading = $('loading');
+  const loadingMessage = $('loading-message');
+  const hint = $('hint');
+  const turnStatus = $('turn-status');
+  const finishTurnButton = $('finish-turn');
+  const eventLog = $('event-log');
+  const rollResult = $('roll-result');
+  const actionPanel = $('action-panel');
+  const dialog = $('dialog');
+  const inspector = $('inspector');
+  const menu = $('menu');
 
   if (!window.THREE) {
     loading.classList.add('failed');
     loadingMessage.innerHTML = '<strong>THREE.JS COULD NOT BE LOADED</strong><small>Check your internet connection and reload the page.</small>';
     return;
   }
-
   if (location.protocol === 'file:') {
     loading.classList.add('failed');
     loadingMessage.innerHTML = '<strong>THE ARCHIVE NEEDS A LOCAL WEB SERVER</strong>Browsers block local image textures when an HTML file is opened directly.<code>./serve.command</code><small>Double-click serve.command, then open http://localhost:8080</small>';
     return;
   }
 
+  const Core = window.ArchiveCore;
+  const AI = window.ArchiveAI;
+  Core.setCardData(CARD_DATA);
+  const HUMAN = 0, CPU = 1;
+  const SPHERE_COLORS = { state: '#7f9bb6', capital: '#d2ad52', occult: '#a777cf', fringe: '#6dbb78' };
+  const SPHERE_BLURB = {
+    state: 'Firewalls, surveillance and arrests. Expose the enemy, then archive what you exposed.',
+    capital: 'Money talks. Network groups fund buy-outs, card draw and the biggest bodies.',
+    occult: 'Secret societies. Covert groups, slow Secrecy leaks and subversive takeovers.',
+    fringe: 'UFOs and cryptids. Haste, Pierce and dice-driven chaos. Hit hard, hit first.'
+  };
+
+  // ---------- Scene ----------
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x090a09);
-  scene.fog = new THREE.FogExp2(0x090a09, 0.027);
-
+  scene.fog = new THREE.FogExp2(0x090a09, 0.024);
   const camera = new THREE.PerspectiveCamera(34, innerWidth / innerHeight, 0.1, 100);
-  camera.position.set(0, 11.5, 13.7);
-  camera.lookAt(0, 0, -0.7);
-
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
@@ -46,6 +56,16 @@
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   root.appendChild(renderer.domElement);
+  function fitCamera() {
+    camera.aspect = innerWidth / innerHeight;
+    // Pull back on narrow screens so the 16-unit-wide table stays in view.
+    const pull = THREE.MathUtils.clamp(1.75 / camera.aspect, 1.12, 2.3);
+    camera.position.set(0, 12.4 * pull, 11.6 * pull);
+    camera.lookAt(0, 0, -0.1);
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  }
+  fitCamera();
 
   scene.add(new THREE.HemisphereLight(0xe7c984, 0x172019, 1.45));
   const key = new THREE.DirectionalLight(0xffd68c, 2.1);
@@ -54,217 +74,303 @@
   key.shadow.bias = -0.0005;
   key.shadow.normalBias = 0.02;
   key.shadow.mapSize.set(1024, 1024);
+  key.shadow.camera.left = -10; key.shadow.camera.right = 10; key.shadow.camera.top = 10; key.shadow.camera.bottom = -10;
   scene.add(key);
 
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -0.58);
-  const cardGeometry = makeRoundedCardGeometry(1.56, 2.18, .075);
-  const flatCardQuaternion = new THREE.Quaternion();
+  const CARD_W = 1.56, CARD_H = 2.18;
+  const cardGeometry = makeRoundedCardGeometry(CARD_W, CARD_H, .075);
+  const glowGeometry = makeRoundedCardGeometry(CARD_W + .16, CARD_H + .16, .12);
   const billboardTarget = new THREE.Object3D();
   const targetQuaternion = new THREE.Quaternion();
   const cameraDirection = new THREE.Vector3();
   const zoomTarget = new THREE.Vector3();
-  const hand = [];
-  const battlefield = [];
-  const archive = [];
-  const opponentBattlefield = [];
   const motions = new Map();
-  const State = Object.freeze({
-    SETUP: 'setup', PLAYER_IDLE: 'playerIdle', PLAYER_DRAGGING: 'playerDragging', CARD_ZOOMED: 'cardZoomed',
-    ROLLING_PLAYER: 'rollingPlayer', REPORTING_PLAYER: 'reportingPlayer',
-    RESOLVING_PLAYER: 'resolvingPlayer', PLAYER_DONE: 'playerDone',
-    AI_THINKING: 'aiThinking', ROLLING_AI: 'rollingAi', REPORTING_AI: 'reportingAi',
-    RESOLVING_AI: 'resolvingAi', GAME_OVER: 'gameOver'
-  });
-  const allowedTransitions = {
-    [State.SETUP]: [State.PLAYER_IDLE],
-    [State.PLAYER_IDLE]: [State.PLAYER_DRAGGING, State.CARD_ZOOMED, State.AI_THINKING, State.GAME_OVER],
-    [State.PLAYER_DRAGGING]: [State.PLAYER_IDLE, State.ROLLING_PLAYER],
-    [State.ROLLING_PLAYER]: [State.REPORTING_PLAYER],
-    [State.REPORTING_PLAYER]: [State.RESOLVING_PLAYER],
-    [State.RESOLVING_PLAYER]: [State.PLAYER_DONE, State.GAME_OVER],
-    [State.PLAYER_DONE]: [State.CARD_ZOOMED, State.AI_THINKING, State.GAME_OVER],
-    [State.CARD_ZOOMED]: [State.PLAYER_IDLE, State.PLAYER_DONE],
-    [State.AI_THINKING]: [State.ROLLING_AI, State.PLAYER_IDLE, State.GAME_OVER],
-    [State.ROLLING_AI]: [State.REPORTING_AI],
-    [State.REPORTING_AI]: [State.RESOLVING_AI],
-    [State.RESOLVING_AI]: [State.PLAYER_IDLE, State.GAME_OVER],
-    [State.GAME_OVER]: []
+  const meshes = new Map();          // engine uid -> mesh
+  const textureCache = new Map();    // card id -> texture
+  let atlasImage, chromeImage, backTexture, table;
+  let dice = [], diceShadows = [], diceAnimation = null;
+  const deckStacks = [[], []];
+
+  // ---------- Table geometry ----------
+  // +z is toward the human player. Field rows sit either side of the centre line.
+  const POS = {
+    hand: [4.35, -5.7],
+    field: [1.45, -1.75],
+    fronts: [new THREE.Vector3(-7.2, 0, 2.75), new THREE.Vector3(-7.2, 0, -4.45)],
+    traps: [new THREE.Vector3(-7.2, 0, 0.2), new THREE.Vector3(-7.2, 0, -1.95)],
+    deck: [new THREE.Vector3(7.0, 0, 2.75), new THREE.Vector3(7.0, 0, -4.45)],
+    archive: [new THREE.Vector3(7.0, 0, 0.2), new THREE.Vector3(7.0, 0, -1.95)]
   };
-  let deck = [];
-  let dragging = null;
-  let pressedCard = null;
-  let hovered = null;
-  let cardZoom = 0;
-  let stateBeforeZoom = null;
-  let suppressNextClick = false;
-  let table, deckTop;
-  let dice = [];
-  let diceShadows = [];
-  let diceAnimation = null;
-  let archiveCount = 0;
-  let playerTokens = 10;
-  let opponentTokens = 10;
-  let opponentGroupCount = 1;
-  let opponentPower = 2;
-  let state = State.SETUP;
+  const FIELD_ZONE = { minZ: -0.3, maxZ: 3.0, maxX: 5.9 };
+  const FRONT_ZONE = { maxX: -6.0, minZ: 1.5, maxZ: 5.2 };
 
-  const textureLoader = new THREE.TextureLoader();
-  const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
-  const dieFaceNormals = [
-    { value: 1, normal: new THREE.Vector3(1, 0, 0) },
-    { value: 6, normal: new THREE.Vector3(-1, 0, 0) },
-    { value: 2, normal: new THREE.Vector3(0, 1, 0) },
-    { value: 5, normal: new THREE.Vector3(0, -1, 0) },
-    { value: 3, normal: new THREE.Vector3(0, 0, 1) },
-    { value: 4, normal: new THREE.Vector3(0, 0, -1) }
-  ];
+  // ---------- State ----------
+  let G = null;                 // engine state
+  let mode = 'menu';            // menu | idle | drag | target | selected | dialog | reroll | busy | over
+  let zoomed = null, modeBeforeZoom = null, cardZoom = 0;
+  let hovered = null, dragging = null, pressed = null, suppressNextClick = false;
+  let pendingPlay = null;       // { uid, list }
+  let selected = null;          // own group uid
+  let selectedMode = 'strike';  // strike | takeover
+  let validTargets = new Set();
+  let logCursor = 0;
+  let humanSphere = 'occult';
 
+  // ---------- Helpers ----------
   function makeRoundedCardGeometry(width, height, radius) {
-    const halfWidth = width / 2;
-    const halfHeight = height / 2;
+    const hw = width / 2, hh = height / 2;
     const shape = new THREE.Shape();
-    shape.moveTo(-halfWidth + radius, -halfHeight);
-    shape.lineTo(halfWidth - radius, -halfHeight);
-    shape.quadraticCurveTo(halfWidth, -halfHeight, halfWidth, -halfHeight + radius);
-    shape.lineTo(halfWidth, halfHeight - radius);
-    shape.quadraticCurveTo(halfWidth, halfHeight, halfWidth - radius, halfHeight);
-    shape.lineTo(-halfWidth + radius, halfHeight);
-    shape.quadraticCurveTo(-halfWidth, halfHeight, -halfWidth, halfHeight - radius);
-    shape.lineTo(-halfWidth, -halfHeight + radius);
-    shape.quadraticCurveTo(-halfWidth, -halfHeight, -halfWidth + radius, -halfHeight);
-
+    shape.moveTo(-hw + radius, -hh);
+    shape.lineTo(hw - radius, -hh);
+    shape.quadraticCurveTo(hw, -hh, hw, -hh + radius);
+    shape.lineTo(hw, hh - radius);
+    shape.quadraticCurveTo(hw, hh, hw - radius, hh);
+    shape.lineTo(-hw + radius, hh);
+    shape.quadraticCurveTo(-hw, hh, -hw, hh - radius);
+    shape.lineTo(-hw, -hh + radius);
+    shape.quadraticCurveTo(-hw, -hh, -hw + radius, -hh);
     const geometry = new THREE.ShapeGeometry(shape, 5);
-    const positions = geometry.attributes.position;
-    const uvs = geometry.attributes.uv;
-    for (let i = 0; i < positions.count; i++) {
-      uvs.setXY(i, positions.getX(i) / width + .5, positions.getY(i) / height + .5);
-    }
+    const pos = geometry.attributes.position, uvs = geometry.attributes.uv;
+    for (let i = 0; i < pos.count; i++) uvs.setXY(i, pos.getX(i) / width + .5, pos.getY(i) / height + .5);
     uvs.needsUpdate = true;
     return geometry;
   }
-
   function canvasTexture(canvas) {
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
     return tex;
   }
+  const textureLoader = new THREE.TextureLoader();
+  const loadTexture = url => new Promise((resolve, reject) => textureLoader.load(url, resolve, undefined, reject));
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const typeLabel = d => ({ group: 'Group', operation: 'Operation', referendum: 'Referendum', asset: 'Asset', trap: 'Countermeasure' })[d.type];
 
-  function fitTitle(ctx, title, maxWidth) {
-    let size = 43;
-    do { ctx.font = `600 ${size--}px Crimson`; } while (ctx.measureText(title).width > maxWidth && size > 23);
-  }
-
+  // ---------- Card faces ----------
   const CARD_ATLAS_COLUMNS = 16;
-
-  function makeCardTexture(index, atlas, chrome) {
-    const canvas = document.createElement('canvas');
-    canvas.width = 636; canvas.height = 888;
-    const ctx = canvas.getContext('2d');
-    const cellW = atlas.width / CARD_ATLAS_COLUMNS;
-    const cellH = atlas.height / CARD_ATLAS_COLUMNS;
-    const col = index % CARD_ATLAS_COLUMNS;
-    const row = Math.floor(index / CARD_ATLAS_COLUMNS);
-    const cropH = cellW * 117 / 142;
-    ctx.fillStyle = '#d7ccb0'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-    // Bleed the artwork just beyond the chrome's transparent window so texture
-    // filtering cannot reveal the card-colored canvas along its inner edge.
-    ctx.drawImage(atlas, col * cellW, row * cellH + (cellH - cropH) / 2, cellW, cropH, 30, 29, 575, 473);
-    ctx.drawImage(chrome, 0, 0, canvas.width, canvas.height);
-    const [name, type, cost, , , keyword, abilityText, flavor] = CARD_DATA[index];
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#eee8d7';
-    fitTitle(ctx, name, 532); ctx.fillText(name, 318, 533);
-    ctx.font = '32px Cardo'; ctx.textAlign = 'left'; ctx.fillStyle = '#29251e';
-    const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
-    const typeLine = keyword ? `${typeLabel}  •  ${keyword}` : typeLabel;
-    ctx.fillText(typeLine, 52, 600);
-    ctx.font = '29px Crimson';
-    const bodyText = abilityText || flavor || '';
-    const words = bodyText.split(' ');
+  function wrap(ctx, text, width) {
+    const words = text.split(' ');
     const lines = [];
     let line = '';
     for (const word of words) {
       const test = line ? line + ' ' + word : word;
-      if (ctx.measureText(test).width > 532 && line) {
-        lines.push(line);
-        line = word;
-      } else {
-        line = test;
-      }
-      if (lines.length >= 3) break;
+      if (ctx.measureText(test).width > width && line) { lines.push(line); line = word; } else line = test;
     }
-    if (line && lines.length < 3) lines.push(line);
-    lines.forEach((line, i) => ctx.fillText(line, 52, 659 + i * 38));
-    ctx.fillStyle = '#29251e'; ctx.textAlign = 'center'; ctx.font = 'bold 44px Cardo';
-    ctx.fillText(String(cost), 557, 817);
-    return canvasTexture(canvas);
+    if (line) lines.push(line);
+    return lines;
+  }
+  function makeCardTexture(id) {
+    if (textureCache.has(id)) return textureCache.get(id);
+    const d = CARD_DATA[id];
+    const canvas = document.createElement('canvas');
+    canvas.width = 636; canvas.height = 888;
+    const ctx = canvas.getContext('2d');
+    const cellW = atlasImage.width / CARD_ATLAS_COLUMNS, cellH = atlasImage.height / CARD_ATLAS_COLUMNS;
+    const col = id % CARD_ATLAS_COLUMNS, row = Math.floor(id / CARD_ATLAS_COLUMNS);
+    const cropH = cellW * 117 / 142;
+    ctx.fillStyle = '#d7ccb0'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(atlasImage, col * cellW, row * cellH + (cellH - cropH) / 2, cellW, cropH, 30, 29, 575, 473);
+    ctx.drawImage(chromeImage, 0, 0, canvas.width, canvas.height);
+    const sphereColor = SPHERE_COLORS[d.sphere];
+    // Title
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#eee8d7';
+    let size = 43;
+    do { ctx.font = `600 ${size--}px Crimson`; } while (ctx.measureText(d.name).width > 470 && size > 23);
+    ctx.fillText(d.name, 300, 533);
+    // Cost medallion
+    ctx.beginPath(); ctx.arc(82, 82, 42, 0, Math.PI * 2);
+    ctx.fillStyle = '#16120ee8'; ctx.fill();
+    ctx.lineWidth = 5; ctx.strokeStyle = sphereColor; ctx.stroke();
+    ctx.fillStyle = '#f0dba4'; ctx.font = 'bold 50px Cardo'; ctx.fillText(String(d.cost), 82, 86);
+    // Type line with sphere pip
+    ctx.textAlign = 'left'; ctx.fillStyle = '#29251e'; ctx.font = '30px Cardo';
+    const sphereName = ArchiveCore.SPHERES[d.sphere].name.replace('The ', '');
+    ctx.fillText(`${typeLabel(d)} — ${sphereName}`, 52, 598);
+    ctx.beginPath(); ctx.arc(578, 598, 13, 0, Math.PI * 2); ctx.fillStyle = sphereColor; ctx.fill();
+    ctx.lineWidth = 2; ctx.strokeStyle = '#29251e'; ctx.stroke();
+    // Body: keywords, rules text, flavour
+    const isGroup = d.type === 'group';
+    const bodyBottom = isGroup ? 790 : 840;
+    const rules = Core.describe(d);
+    const kw = (d.keywords || []).join(' · ');
+    let fs = 30, lh, lines;
+    for (; fs >= 20; fs -= 2) {
+      lh = fs * 1.25;
+      lines = [];
+      if (kw) { ctx.font = `${fs}px CrimsonSemi`; wrap(ctx, kw, 532).forEach(t => lines.push({ t, f: `${fs}px CrimsonSemi` })); }
+      if (rules) { ctx.font = `${fs}px Crimson`; wrap(ctx, rules, 532).forEach(t => lines.push({ t, f: `${fs}px Crimson` })); }
+      if (650 + lines.length * lh <= bodyBottom + 4) break;
+    }
+    if (!kw && !rules) lines = [];
+    let y = 650;
+    ctx.fillStyle = '#29251e';
+    lines.forEach(l => { ctx.font = l.f; ctx.fillText(l.t, 52, y); y += lh; });
+    ctx.font = `italic 25px CrimsonItalic`; ctx.fillStyle = '#5b5244';
+    const flavor = wrap(ctx, d.flavor || '', isGroup ? 400 : 532);
+    const room = Math.floor((bodyBottom - y + 6) / 31);
+    flavor.slice(0, Math.max(0, room)).forEach(t => { ctx.fillText(t, 52, y + 6); y += 31; });
+    // Power / Resistance
+    if (isGroup) {
+      ctx.fillStyle = '#17130fe6';
+      roundRect(ctx, 462, 788, 136, 62, 10); ctx.fill();
+      ctx.lineWidth = 3; ctx.strokeStyle = sphereColor; ctx.stroke();
+      ctx.fillStyle = '#f2e3bd'; ctx.textAlign = 'center'; ctx.font = 'bold 42px Cardo';
+      ctx.fillText(`${d.power}/${d.toughness}`, 530, 821);
+    }
+    const tex = canvasTexture(canvas);
+    textureCache.set(id, tex);
+    return tex;
+  }
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
   }
 
-  function createCard(index, texture) {
-    const mat = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.71, metalness: 0.04, side: THREE.DoubleSide });
-    const mesh = new THREE.Mesh(cardGeometry, mat);
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    mesh.userData = { index, zone: 'deck', target: new THREE.Vector3(), targetRot: 0 };
+  // Live status badge drawn under field groups.
+  function drawBadge(mesh) {
+    const b = mesh.userData.badge;
+    const ctx = b.ctx;
+    const uid = mesh.userData.uid;
+    const c = G.cards[uid];
+    const d = Core.def(G, uid);
+    const isGroup = d.type === 'group';
+    const p = isGroup ? Core.power(G, uid) : 0, r = isGroup ? Core.remaining(G, uid) : 0;
+    const tags = [];
+    if (c.exposed) tags.push(['EXPOSED', '#ff6b5c']);
+    if (c.detained) tags.push(['DETAINED', '#8fb3ff']);
+    else if (isGroup && G.players[c.ctrl].field.includes(uid) && c.ctrl === G.active && Core.canAct(G, uid)) tags.push(['READY', '#9be28f']);
+    if (isGroup && c.grant && c.grant.includes('Loyal')) tags.push(['TURNED', '#e0c071']);
+    const key = [p, r, c.dmg, tags.map(t => t[0]).join(), d.type].join('|');
+    if (b.key === key) return;
+    b.key = key;
+    ctx.clearRect(0, 0, 320, 80);
+    ctx.fillStyle = '#0c0b09e8'; roundRect(ctx, 2, 2, 316, 76, 14); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = c.exposed ? '#c8473b' : '#7d6337'; ctx.stroke();
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 21px Cinzel';
+    ctx.textAlign = 'left';
+    let x = 16;
+    if (!isGroup) { ctx.fillStyle = '#d8c497'; ctx.fillText(d.type === 'asset' ? 'ASSET · ONGOING' : '', x, 41); }
+    ctx.font = `bold ${tags.length > 1 ? 17 : 21}px Cinzel`;
+    tags.slice(0, 2).forEach(([t, col]) => { ctx.fillStyle = col; ctx.fillText(t, x, 41); x += ctx.measureText(t).width + 10; });
+    if (isGroup) {
+      ctx.textAlign = 'right'; ctx.font = 'bold 44px Cardo';
+      const basePow = d.power, baseRes = d.toughness;
+      ctx.fillStyle = p > basePow ? '#9be28f' : p < basePow ? '#ff8a7a' : '#f2e3bd';
+      const resText = String(r);
+      ctx.fillText(resText, 304, 43);
+      const wRes = ctx.measureText(resText).width;
+      ctx.fillStyle = '#9f8a63'; ctx.fillText('/', 304 - wRes - 2, 43);
+      const wSlash = ctx.measureText('/').width;
+      ctx.fillStyle = p > basePow ? '#9be28f' : p < basePow ? '#ff8a7a' : '#f2e3bd';
+      ctx.fillText(String(p), 304 - wRes - wSlash - 4, 43);
+      ctx.fillStyle = r < baseRes ? '#ff8a7a' : r > baseRes ? '#9be28f' : '#f2e3bd';
+      ctx.fillText(resText, 304, 43);
+    }
+    b.texture.needsUpdate = true;
+  }
+
+  // ---------- Meshes ----------
+  function createCardMesh(uid) {
+    const c = G.cards[uid];
+    const front = new THREE.MeshStandardMaterial({ map: makeCardTexture(c.id), roughness: 0.71, metalness: 0.04, side: THREE.FrontSide });
+    const mesh = new THREE.Mesh(cardGeometry, front);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    const back = new THREE.Mesh(cardGeometry, new THREE.MeshStandardMaterial({ map: backTexture, roughness: .68 }));
+    back.rotation.y = Math.PI; back.position.z = -.002; back.castShadow = true;
+    mesh.add(back);
+    const glow = new THREE.Mesh(glowGeometry, new THREE.MeshBasicMaterial({ color: 0xd4a84f, transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+    glow.position.z = -.006; glow.renderOrder = -1;
+    mesh.add(glow);
+    const badgeCanvas = document.createElement('canvas'); badgeCanvas.width = 320; badgeCanvas.height = 80;
+    const badgeTex = canvasTexture(badgeCanvas);
+    const badge = new THREE.Mesh(new THREE.PlaneGeometry(1.5, .375), new THREE.MeshBasicMaterial({ map: badgeTex, transparent: true, depthWrite: false }));
+    badge.position.set(0, -1.12, .02); badge.visible = false;
+    mesh.add(badge);
+    mesh.userData = { uid, zone: 'deck', target: new THREE.Vector3(), rot: 0, faceDown: true, glow, badgeMesh: badge,
+      badge: { ctx: badgeCanvas.getContext('2d'), texture: badgeTex, key: null } };
+    mesh.visible = false;
     scene.add(mesh);
+    meshes.set(uid, mesh);
     return mesh;
+  }
+  function flatQuat(rot, faceDown) {
+    return new THREE.Quaternion().setFromEuler(new THREE.Euler(faceDown ? Math.PI / 2 : -Math.PI / 2, 0, faceDown ? Math.PI + rot : rot));
   }
 
   function makeTable(texture) {
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
-    const mat = new THREE.MeshStandardMaterial({ map: texture, roughness: 0.92, metalness: 0.02 });
-    table = new THREE.Mesh(new THREE.PlaneGeometry(18, 13.5), mat);
-    table.rotation.x = -Math.PI / 2;
-    table.position.set(0, -0.09, -0.7);
-    table.receiveShadow = true;
+    table = new THREE.Mesh(new THREE.PlaneGeometry(18, 13.5), new THREE.MeshStandardMaterial({ map: texture, roughness: 0.92, metalness: 0.02 }));
+    table.rotation.x = -Math.PI / 2; table.position.set(0, -0.09, -0.4); table.receiveShadow = true;
     scene.add(table);
-
-    // Battle zone: covers player field rows (z = -1.4 to +2.8), centered at z = 0.7
-    const zone = new THREE.Mesh(new THREE.PlaneGeometry(11.4, 4.4), new THREE.MeshBasicMaterial({ color: 0x9b7436, transparent: true, opacity: 0.045, side: THREE.DoubleSide }));
-    zone.rotation.x = -Math.PI / 2; zone.position.set(-0.4, 0.012, 0.7); zone.name = 'battle-zone';
-    scene.add(zone);
-    const border = new THREE.LineSegments(new THREE.EdgesGeometry(zone.geometry), new THREE.LineBasicMaterial({ color: 0xb58b45, transparent: true, opacity: 0.24 }));
-    border.rotation.copy(zone.rotation); border.position.copy(zone.position); scene.add(border);
+    const zoneMat = (op) => new THREE.MeshBasicMaterial({ color: 0x9b7436, transparent: true, opacity: op, side: THREE.DoubleSide, depthWrite: false });
+    const addZone = (w, h, x, z, op = .045) => {
+      const zone = new THREE.Mesh(new THREE.PlaneGeometry(w, h), zoneMat(op));
+      zone.rotation.x = -Math.PI / 2; zone.position.set(x, 0.012, z); scene.add(zone);
+      const border = new THREE.LineSegments(new THREE.EdgesGeometry(zone.geometry), new THREE.LineBasicMaterial({ color: 0xb58b45, transparent: true, opacity: .24 }));
+      border.rotation.copy(zone.rotation); border.position.copy(zone.position); scene.add(border);
+      return zone;
+    };
+    addZone(12.4, 2.75, -0.3, POS.field[0]);
+    addZone(12.4, 2.75, -0.3, POS.field[1], .03);
+    [0, 1].forEach(p => {
+      addZone(2.1, 2.5, POS.fronts[p].x, POS.fronts[p].z, p ? .03 : .07);
+      addZone(2.1, 2.5, POS.traps[p].x, POS.traps[p].z, .02);
+      addZone(2.1, 2.5, POS.archive[p].x, POS.archive[p].z, .02);
+      tableLabel(p ? 'ENEMY FRONTS' : 'YOUR FRONTS', POS.fronts[p].x, POS.fronts[p].z);
+      tableLabel(p ? 'ENEMY COUNTERS' : 'COUNTERMEASURES', POS.traps[p].x, POS.traps[p].z);
+      tableLabel(p ? 'ENEMY ARCHIVE' : 'YOUR ARCHIVE', POS.archive[p].x, POS.archive[p].z);
+    });
   }
-
-  function makeDeck(backTexture) {
+  function tableLabel(text, x, z) {
+    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 64;
+    const ctx = canvas.getContext('2d');
+    ctx.font = '600 34px Cinzel'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#d8bf83'; ctx.globalAlpha = .62; ctx.fillText(text, 256, 34);
+    const label = new THREE.Mesh(new THREE.PlaneGeometry(1.9, .2375), new THREE.MeshBasicMaterial({ map: canvasTexture(canvas), transparent: true, depthWrite: false }));
+    label.rotation.x = -Math.PI / 2; label.position.set(x, .015, z);
+    scene.add(label);
+  }
+  function makeDeckStacks() {
     backTexture.colorSpace = THREE.SRGBColorSpace;
-    const geom = cardGeometry;
-    for (let i = 0; i < 5; i++) {
-      const card = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({ map: backTexture, roughness: .68, side: THREE.DoubleSide }));
-      card.rotation.x = -Math.PI / 2; card.position.set(6.55, 0.035 + i * .025, .1 + i * .012);
-      card.castShadow = true; card.receiveShadow = true; card.userData.deck = true; scene.add(card);
-      if (i === 4) deckTop = card;
+    for (let p = 0; p < 2; p++) {
+      for (let i = 0; i < 6; i++) {
+        const card = new THREE.Mesh(cardGeometry, new THREE.MeshStandardMaterial({ map: backTexture, roughness: .68 }));
+        card.quaternion.copy(flatQuat(0, false));
+        card.position.set(POS.deck[p].x, 0.03 + i * .025, POS.deck[p].z + i * .01);
+        card.castShadow = true; card.receiveShadow = true; scene.add(card);
+        deckStacks[p].push(card);
+      }
     }
   }
 
+  // ---------- Dice ----------
+  const dieFaceNormals = [
+    { value: 1, normal: new THREE.Vector3(1, 0, 0) }, { value: 6, normal: new THREE.Vector3(-1, 0, 0) },
+    { value: 2, normal: new THREE.Vector3(0, 1, 0) }, { value: 5, normal: new THREE.Vector3(0, -1, 0) },
+    { value: 3, normal: new THREE.Vector3(0, 0, 1) }, { value: 4, normal: new THREE.Vector3(0, 0, -1) }
+  ];
   function makeDieFaceTexture(baseImage, value) {
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256;
     const ctx = canvas.getContext('2d'); ctx.drawImage(baseImage, 0, 0, 256, 256);
     const positions = {
-      1: [[.5,.5]], 2: [[.3,.3],[.7,.7]], 3: [[.3,.3],[.5,.5],[.7,.7]],
-      4: [[.3,.3],[.7,.3],[.3,.7],[.7,.7]],
-      5: [[.3,.3],[.7,.3],[.5,.5],[.3,.7],[.7,.7]],
-      6: [[.3,.25],[.7,.25],[.3,.5],[.7,.5],[.3,.75],[.7,.75]]
+      1: [[.5, .5]], 2: [[.3, .3], [.7, .7]], 3: [[.3, .3], [.5, .5], [.7, .7]],
+      4: [[.3, .3], [.7, .3], [.3, .7], [.7, .7]], 5: [[.3, .3], [.7, .3], [.5, .5], [.3, .7], [.7, .7]],
+      6: [[.3, .25], [.7, .25], [.3, .5], [.7, .5], [.3, .75], [.7, .75]]
     };
     ctx.shadowColor = '#000'; ctx.shadowBlur = 9; ctx.fillStyle = '#e0b45c';
-    positions[value].forEach(([x,y]) => { ctx.beginPath(); ctx.arc(x * 256, y * 256, 20, 0, Math.PI * 2); ctx.fill(); });
+    positions[value].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x * 256, y * 256, 20, 0, Math.PI * 2); ctx.fill(); });
     return canvasTexture(canvas);
   }
-
   function makeDice(baseTexture) {
-    const valuesByFace = [1, 6, 2, 5, 3, 4];
-    const materials = valuesByFace.map(value => new THREE.MeshStandardMaterial({
-      map: makeDieFaceTexture(baseTexture.image, value), roughness: .48, metalness: .12
-    }));
-    // A common 16 mm die is roughly one quarter of a 63 mm MTG card's width.
+    const materials = [1, 6, 2, 5, 3, 4].map(value => new THREE.MeshStandardMaterial({ map: makeDieFaceTexture(baseTexture.image, value), roughness: .48, metalness: .12 }));
     const dieSize = 1.56 * 16 / 63;
     const geometry = new THREE.BoxGeometry(dieSize, dieSize, dieSize, 2, 2, 2);
-    dice = [-1, 1].map((side, i) => {
+    dice = [0, 1].map(i => {
       const die = new THREE.Mesh(geometry, materials); die.visible = false;
       die.castShadow = true; die.receiveShadow = true; die.renderOrder = 200 + i;
       scene.add(die); return die;
@@ -273,12 +379,10 @@
     const shadowMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .72, depthWrite: false });
     diceShadows = dice.map((die, i) => {
       const shadow = new THREE.Mesh(shadowGeometry, shadowMaterial);
-      shadow.rotation.x = -Math.PI / 2; shadow.position.y = -.075;
-      shadow.visible = false; shadow.renderOrder = 190 + i; scene.add(shadow);
+      shadow.rotation.x = -Math.PI / 2; shadow.position.y = -.075; shadow.visible = false; shadow.renderOrder = 190 + i; scene.add(shadow);
       return shadow;
     });
   }
-
   function createDieBody(die, velocity, angular) {
     const half = die.geometry.parameters.width / 2;
     const points = [];
@@ -289,12 +393,9 @@
       points.push({ position, previous: position.clone().addScaledVector(pointVelocity, -1 / 120) });
     }
     const constraints = [];
-    for (let a = 0; a < points.length; a++) for (let b = a + 1; b < points.length; b++) {
-      constraints.push({ a, b, length: points[a].position.distanceTo(points[b].position) });
-    }
+    for (let a = 0; a < points.length; a++) for (let b = a + 1; b < points.length; b++) constraints.push({ a, b, length: points[a].position.distanceTo(points[b].position) });
     return { points, constraints, half };
   }
-
   function syncDieFromBody(die, body) {
     die.position.set(0, 0, 0);
     body.points.forEach(point => die.position.add(point.position));
@@ -305,64 +406,44 @@
     y.crossVectors(z, x).normalize();
     die.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
   }
-
   function topFaceValueFromQuaternion(quaternion) {
     const up = new THREE.Vector3(0, 1, 0);
-    let bestValue = 2;
-    let bestDot = -Infinity;
+    let bestValue = 2, bestDot = -Infinity;
     dieFaceNormals.forEach(face => {
       const dot = face.normal.clone().applyQuaternion(quaternion).dot(up);
       if (dot > bestDot) { bestDot = dot; bestValue = face.value; }
     });
     return bestValue;
   }
-
   function applyRollingImpulse(body, dt, floor) {
     const center = body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / body.points.length);
     const contactPoints = [];
     const contactVelocity = new THREE.Vector3();
     body.points.forEach(point => {
-      if (point.position.y <= floor + .012) {
-        contactPoints.push(point);
-        contactVelocity.add(point.position.clone().sub(point.previous));
-      }
+      if (point.position.y <= floor + .012) { contactPoints.push(point); contactVelocity.add(point.position.clone().sub(point.previous)); }
     });
     if (!contactPoints.length) return;
-
-    contactVelocity.multiplyScalar(1 / contactPoints.length);
-    contactVelocity.y = 0;
+    contactVelocity.multiplyScalar(1 / contactPoints.length); contactVelocity.y = 0;
     const speed = contactVelocity.length();
     if (speed < .025) return;
-
     const axis = new THREE.Vector3(contactVelocity.z, 0, -contactVelocity.x);
     const axisLength = axis.length();
     if (axisLength < 1e-6) return;
     axis.multiplyScalar(1 / axisLength);
-
     const spin = Math.min(.16, speed * dt * 2.2) * Math.min(1, contactPoints.length / 4);
     if (spin <= 0) return;
-
     const rotation = new THREE.Quaternion().setFromAxisAngle(axis, spin);
-    body.points.forEach(point => {
-      point.position.sub(center).applyQuaternion(rotation).add(center);
-    });
+    body.points.forEach(point => { point.position.sub(center).applyQuaternion(rotation).add(center); });
   }
-
   function simulateDiceStep(bodies, dt) {
     const floor = -.09;
-    // Card scale: 2.18 scene units = 88 mm, so terrestrial gravity is ~243 units/s².
     const gravity = 9.81 * (2.18 / .088);
-    const deskRestitution = .72;
-    const contactFriction = .24;
-    const wallRestitution = .56;
-    const wallFriction = .9;
-    bodies.forEach(body => {
-      body.points.forEach(point => {
-        const velocity = point.position.clone().sub(point.previous).multiplyScalar(.999);
-        point.previous.copy(point.position);
-        point.position.add(velocity); point.position.y -= gravity * dt * dt;
-      });
-    });
+    const deskRestitution = .72, contactFriction = .24, wallRestitution = .56, wallFriction = .9;
+    bodies.forEach(body => body.points.forEach(point => {
+      const velocity = point.position.clone().sub(point.previous).multiplyScalar(.999);
+      point.previous.copy(point.position);
+      point.position.add(velocity); point.position.y -= gravity * dt * dt;
+    }));
     for (let iteration = 0; iteration < 7; iteration++) {
       bodies.forEach(body => {
         body.constraints.forEach(constraint => {
@@ -372,426 +453,566 @@
           a.add(delta); b.sub(delta);
         });
         body.points.forEach(point => {
-          const dx = point.position.x - point.previous.x;
-          const dy = point.position.y - point.previous.y;
-          const dz = point.position.z - point.previous.z;
+          const dx = point.position.x - point.previous.x, dy = point.position.y - point.previous.y, dz = point.position.z - point.previous.z;
           if (point.position.y < floor) {
             point.position.y = floor;
             point.previous.y = point.position.y + dy * deskRestitution;
             point.previous.x = point.position.x - dx * contactFriction;
             point.previous.z = point.position.z - dz * contactFriction;
           }
-          if (point.position.x < -8.45) {
-            point.position.x = -8.45;
-            point.previous.x = point.position.x + dx * wallRestitution;
-            point.previous.y = point.position.y - dy * wallFriction;
-            point.previous.z = point.position.z - dz * wallFriction;
-          } else if (point.position.x > 8.45) {
-            point.position.x = 8.45;
-            point.previous.x = point.position.x + dx * wallRestitution;
-            point.previous.y = point.position.y - dy * wallFriction;
-            point.previous.z = point.position.z - dz * wallFriction;
-          }
-          if (point.position.z < -7.05) {
-            point.position.z = -7.05;
-            point.previous.z = point.position.z + dz * wallRestitution;
-            point.previous.x = point.position.x - dx * wallFriction;
-            point.previous.y = point.position.y - dy * wallFriction;
-          } else if (point.position.z > 5.65) {
-            point.position.z = 5.65;
-            point.previous.z = point.position.z + dz * wallRestitution;
-            point.previous.x = point.position.x - dx * wallFriction;
-            point.previous.y = point.position.y - dy * wallFriction;
+          for (const [axis, lo, hi, o1, o2] of [['x', -8.45, 8.45, 'y', 'z'], ['z', -6.75, 5.95, 'x', 'y']]) {
+            const d = { x: dx, y: dy, z: dz };
+            if (point.position[axis] < lo || point.position[axis] > hi) {
+              point.position[axis] = point.position[axis] < lo ? lo : hi;
+              point.previous[axis] = point.position[axis] + d[axis] * wallRestitution;
+              point.previous[o1] = point.position[o1] - d[o1] * wallFriction;
+              point.previous[o2] = point.position[o2] - d[o2] * wallFriction;
+            }
           }
         });
       });
-      const centers = bodies.map(body => body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / 8));
-      const delta = centers[1].clone().sub(centers[0]);
-      const overlap = bodies[0].half * 2 - Math.max(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z));
-      if (overlap > 0) {
-        const axis = Math.abs(delta.x) >= Math.abs(delta.z) ? new THREE.Vector3(Math.sign(delta.x) || 1, 0, 0) : new THREE.Vector3(0, 0, Math.sign(delta.z) || 1);
-        bodies.forEach((body, i) => body.points.forEach(point => point.position.addScaledVector(axis, (i ? 1 : -1) * overlap * .25)));
+      if (bodies.length === 2) {
+        const centers = bodies.map(body => body.points.reduce((sum, point) => sum.add(point.position), new THREE.Vector3()).multiplyScalar(1 / 8));
+        const delta = centers[1].clone().sub(centers[0]);
+        const overlap = bodies[0].half * 2 - Math.max(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z));
+        if (overlap > 0) {
+          const axis = Math.abs(delta.x) >= Math.abs(delta.z) ? new THREE.Vector3(Math.sign(delta.x) || 1, 0, 0) : new THREE.Vector3(0, 0, Math.sign(delta.z) || 1);
+          bodies.forEach((body, i) => body.points.forEach(point => point.position.addScaledVector(axis, (i ? 1 : -1) * overlap * .25)));
+        }
       }
       bodies.forEach(body => applyRollingImpulse(body, dt, floor));
     }
   }
-
-  // Roll values are decided here (pure RNG), before physics plays out.
-  // The physics sim is purely cosmetic; at reveal time the die snaps to show the pre-rolled face.
-  function rollD6() { return Math.floor(Math.random() * 6) + 1; }
-
-  // Returns a quaternion that puts `targetValue` face-up.
-  function quaternionForFaceUp(targetValue) {
-    const face = dieFaceNormals.find(f => f.value === targetValue);
-    const up = new THREE.Vector3(0, 1, 0);
-    const q = new THREE.Quaternion();
-    q.setFromUnitVectors(face.normal, up);
-    return q;
-  }
-
-  function rollPhysicalDice(owner, preRolledValues) {
-    const isPlayer = owner === 'player';
-    dice.forEach((die, i) => {
-      die.visible = true; diceShadows[i].visible = true;
-      die.position.set(
-        isPlayer ? 5.2 + i * .34 : -5.2 - i * .34,
-        1.5 + i * .22,
-        isPlayer ? 4.35 + i * .12 : -4.75 - i * .12
-      );
-      die.rotation.set(Math.random() * 3, Math.random() * 3, Math.random() * 3);
+  // Throw `count` physical dice; resolves with the faces they land on.
+  function rollPhysicalDice(owner, count) {
+    const isPlayer = owner === HUMAN;
+    const used = dice.slice(0, count);
+    dice.forEach((die, i) => { die.visible = i < count; diceShadows[i].visible = i < count; });
+    used.forEach((die, i) => {
+      die.position.set(isPlayer ? 5.2 + i * .34 : -5.2 - i * .34, 1.5 + i * .22, isPlayer ? 4.35 + i * .12 : -4.75 - i * .12);
+      die.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
     });
     return new Promise(resolve => {
       const direction = isPlayer ? 1 : -1;
-      diceAnimation = {
-        start: performance.now(), resolve, values: preRolledValues, revealing: false,
-        velocities: [
-          new THREE.Vector3(-18 * direction, 27, -16 * direction),
-          new THREE.Vector3(-21 * direction, 30, -13 * direction)
-        ],
-        angular: [new THREE.Vector3(11.7, 14.4, 10.1), new THREE.Vector3(-13.2, 11.9, 15.3)],
-        accumulator: 0, last: performance.now()
-      };
-      diceAnimation.bodies = dice.map((die, i) => createDieBody(die, diceAnimation.velocities[i], diceAnimation.angular[i]));
+      const jitter = () => (Math.random() - .5) * 4;
+      const velocities = [new THREE.Vector3(-18 * direction + jitter(), 27, -16 * direction + jitter()), new THREE.Vector3(-21 * direction + jitter(), 30, -13 * direction + jitter())];
+      const angular = [new THREE.Vector3(11.7 + jitter(), 14.4, 10.1), new THREE.Vector3(-13.2, 11.9 + jitter(), 15.3)];
+      diceAnimation = { start: performance.now(), resolve, count, last: performance.now(), accumulator: 0 };
+      diceAnimation.bodies = used.map((die, i) => createDieBody(die, velocities[i], angular[i]));
     });
   }
-
-  async function reportRoll(total, owner) {
-    transition(owner === 'player' ? State.REPORTING_PLAYER : State.REPORTING_AI);
+  async function showRoll(total, label, success) {
+    rollResult.querySelector('small').textContent = label;
     rollResult.querySelector('strong').textContent = total;
+    rollResult.classList.toggle('fail', success === false);
+    rollResult.classList.toggle('ok', success === true);
     rollResult.classList.add('show');
-    await new Promise(resolve => setTimeout(resolve, 520));
+    await wait(success == null ? 650 : 1050);
     rollResult.classList.remove('show');
     dice.forEach(die => { die.visible = false; });
     diceShadows.forEach(shadow => { shadow.visible = false; });
   }
 
-  function layoutHand() {
-    const count = hand.length;
-    const spacing = Math.min(1.18, 7.1 / Math.max(count - 1, 1));
-    hand.forEach((card, i) => {
-      const offset = i - (count - 1) / 2;
-      card.userData.target.set(offset * spacing, .14 + i * .009, 4.12 + Math.abs(offset) * .08);
-      card.userData.targetRot = -offset * .045;
-      card.userData.zone = 'hand';
-      card.renderOrder = i;
-    });
+  // ---------- Layout: engine state -> mesh targets ----------
+  function place(mesh, zone, target, rot, faceDown, order = 0) {
+    const u = mesh.userData;
+    if (!mesh.visible) {
+      // Entering play from a pile: start at that player's deck.
+      const owner = G.cards[u.uid].owner;
+      mesh.position.copy(POS.deck[owner]).setY(.45);
+      mesh.quaternion.copy(flatQuat(0, true));
+      mesh.visible = true;
+    }
+    u.zone = zone; u.target.copy(target); u.rot = rot; u.faceDown = faceDown;
+    mesh.renderOrder = order;
   }
-
-  // Z axis: positive = toward camera/player, negative = away (opponent side).
-  // Card height is 2.18 units. Rows must be separated by at least 2.3 to avoid overlap.
-  //   hand:              z ≈  4.1
-  //   player field row0: z =  1.7,  row1: z = -0.3  (close to player, gaps from hand)
-  //   center divider:    z ≈ -1.5
-  //   opp field row0:    z = -3.2,  row1: z = -5.0  (clearly on opponent side)
-  const PLAYER_FIELD_Z_START =  1.7;
-  const PLAYER_FIELD_Z_STEP  = -2.0;
-  const OPP_FIELD_Z_START    = -3.2;
-  const OPP_FIELD_Z_STEP     = -1.8;
-
-  function layoutBattlefield() {
-    const cols = Math.min(5, Math.max(1, battlefield.length));
-    battlefield.forEach((card, i) => {
-      const row = Math.floor(i / cols), col = i % cols;
-      const rowCount = Math.min(cols, battlefield.length - row * cols);
-      card.userData.target.set(
-        (col - (rowCount - 1) / 2) * 1.78 - .35,
-        .08 + col * .009,
-        PLAYER_FIELD_Z_START + row * PLAYER_FIELD_Z_STEP
-      );
-      card.userData.targetRot = 0;
-      card.userData.zone = 'field';
-    });
-  }
-
-  function layoutOpponentBattlefield() {
-    const cols = Math.min(5, Math.max(1, opponentBattlefield.length));
-    opponentBattlefield.forEach((card, i) => {
-      const row = Math.floor(i / cols), col = i % cols;
-      const rowCount = Math.min(cols, opponentBattlefield.length - row * cols);
-      card.userData.target.set(
-        (col - (rowCount - 1) / 2) * 1.78 - .4,
-        .08 + col * .009,
-        OPP_FIELD_Z_START + row * OPP_FIELD_Z_STEP
-      );
-      card.userData.targetRot = Math.PI;
-      card.userData.zone = 'opponent-field';
-    });
-  }
-
-  function transition(next) {
-    if (state === next) return;
-    if (!allowedTransitions[state]?.includes(next)) throw new Error(`Invalid game transition: ${state} → ${next}`);
-    state = next;
-    updateLabels();
-  }
-
-  function moveCard(card, target, targetRot = 0, duration = 650) {
-    return new Promise(resolve => {
-      motions.set(card, {
-        from: card.position.clone(), to: target.clone(),
-        fromQuat: card.quaternion.clone(), toQuat: new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, targetRot)),
-        start: performance.now(), duration, resolve
+  function layout() {
+    if (!G) return;
+    const seen = new Set();
+    for (let p = 0; p < 2; p++) {
+      const P = G.players[p];
+      const human = p === HUMAN;
+      // Hand
+      const n = P.hand.length;
+      P.hand.forEach((uid, i) => {
+        const m = meshes.get(uid); if (m === dragging || (pendingPlay && pendingPlay.uid === uid)) { seen.add(uid); return; }
+        const offset = i - (n - 1) / 2;
+        if (human) {
+          const spacing = Math.min(1.2, 7.4 / Math.max(n - 1, 1));
+          place(m, 'hand', new THREE.Vector3(offset * spacing - .3, .14 + i * .009, POS.hand[0] + Math.abs(offset) * .07), -offset * .04, false, i);
+        } else {
+          const spacing = Math.min(.62, 4.2 / Math.max(n - 1, 1));
+          place(m, 'opp-hand', new THREE.Vector3(offset * spacing - .3, .05 + i * .006, POS.hand[1]), offset * .03, true, i);
+        }
+        seen.add(uid);
       });
+      // Field
+      const F = P.field;
+      const spacing = Math.min(1.74, 11.6 / Math.max(F.length, 1));
+      F.forEach((uid, i) => {
+        const m = meshes.get(uid);
+        const c = G.cards[uid];
+        const x = (i - (F.length - 1) / 2) * spacing - .3;
+        place(m, 'field', new THREE.Vector3(x, .06 + i * .004, POS.field[p]), c.exhausted ? .14 : 0, false, 10 + i);
+        seen.add(uid);
+      });
+      // Fronts (face-down fan)
+      P.fronts.forEach((uid, i) => {
+        place(meshes.get(uid), 'front', POS.fronts[p].clone().add(new THREE.Vector3((i % 6) * .07, .03 + i * .012, -Math.floor(i / 6) * .25 + (i % 6) * .02)), -.05 + (i % 3) * .04, true, 30 + i);
+        seen.add(uid);
+      });
+      // Traps
+      P.traps.forEach((uid, i) => {
+        place(meshes.get(uid), 'trap', POS.traps[p].clone().add(new THREE.Vector3(i * .32, .04 + i * .02, i * .12)), .06 * (i ? 1 : -1), true, 40 + i);
+        seen.add(uid);
+      });
+      // Archive: show the top three
+      P.archive.forEach((uid, i) => {
+        const m = meshes.get(uid);
+        const top = i >= P.archive.length - 3;
+        if (!top) { if (m.visible && !motions.has(m) && m.userData.zone === 'archive') m.visible = false; seen.add(uid); return; }
+        place(m, 'archive', POS.archive[p].clone().add(new THREE.Vector3(0, .05 + (i - P.archive.length + 3) * .02, 0)), .03 * ((i % 3) - 1), false, 50 + i);
+        seen.add(uid);
+      });
+      // Deck stacks
+      deckStacks[p].forEach((card, i) => { card.visible = P.deck.length > i * 7; });
+    }
+    meshes.forEach((m, uid) => { if (!seen.has(uid) && m !== dragging) { m.visible = false; m.userData.zone = 'deck'; } });
+    refreshHud();
+  }
+
+  // ---------- HUD ----------
+  function refreshHud() {
+    if (!G) return;
+    for (let p = 0; p < 2; p++) {
+      const P = G.players[p];
+      const el = $(p === HUMAN ? 'player-panel' : 'opponent-panel');
+      el.querySelector('strong').textContent = P.name.toUpperCase();
+      el.querySelector('.secrecy').innerHTML = `<span>◆</span>${Math.max(0, P.secrecy)}`;
+      const groups = Core.groupsOf(G, p).length;
+      el.querySelector('small').textContent = `${groups} group${groups === 1 ? '' : 's'} · ${P.fronts.length} front${P.fronts.length === 1 ? '' : 's'} · hand ${P.hand.length} · deck ${P.deck.length}`;
+      el.querySelector('.narrative').hidden = G.narrative !== p;
+      el.querySelector('.portrait').classList.toggle('active', G.active === p);
+      el.querySelector('.portrait').style.borderColor = SPHERE_COLORS[P.sphere];
+      el.classList.toggle('targetable', mode === 'selected' && p === CPU && validTargets.has('player'));
+    }
+    const P = G.players[HUMAN];
+    $('influence').innerHTML = `INFLUENCE <b>${G.active === HUMAN ? P.influence : '–'}</b><small>${P.fronts.length} FRONTS${P.frontPlayed ? '' : ' · DRAG A CARD HERE FOR +1'}</small>`;
+    $('influence').classList.toggle('pulse', G.active === HUMAN && !P.frontPlayed && mode === 'idle');
+    const status = G.phase === 'over' ? (G.winner === HUMAN ? 'VICTORY' : 'DEFEAT')
+      : zoomed ? 'INSPECTING DOSSIER · TAP TO CLOSE'
+        : G.active === HUMAN ? (mode === 'reroll' ? 'REROLL OR ACCEPT' : mode === 'busy' ? 'RESOLVING' : `YOUR TURN ${Math.ceil(G.turn / 2)}`) : 'THE ENEMY IS ACTING';
+    turnStatus.innerHTML = `<span class="turn-dot"></span>${status}`;
+    finishTurnButton.disabled = !(G.active === HUMAN && G.phase === 'main' && ['idle', 'selected'].includes(mode) && !G.pending);
+    // Valid-move glows
+    meshes.forEach((m, uid) => {
+      const u = m.userData;
+      const glow = u.glow.material;
+      let color = null, opacity = 0;
+      const c = G.cards[uid];
+      if (uid === selected) { color = 0x6fd6ff; opacity = .85; }
+      else if (validTargets.has(uid)) { color = selectedMode === 'takeover' && mode === 'selected' ? 0xc58cff : 0xffc35a; opacity = .8; }
+      else if (u.zone === 'field' && c.exposed) { color = 0xc8473b; opacity = .45; }
+      else if (G.active === HUMAN && mode === 'idle' && u.zone === 'field' && c.ctrl === HUMAN && Core.canAct(G, uid)) { color = 0x88d17a; opacity = .35; }
+      else if (G.active === HUMAN && mode === 'idle' && u.zone === 'hand' && canPlayFromHand(uid)) { color = 0xd4a84f; opacity = .3; }
+      if (color != null) glow.color.setHex(color);
+      u.glowOpacity = opacity;
+      const showBadge = u.zone === 'field';
+      u.badgeMesh.visible = showBadge;
+      if (showBadge) drawBadge(m);
+      m.material.color.setScalar(u.zone === 'field' && c.exhausted ? .62 : 1);
     });
   }
-
-  function stageAttackCard(card, owner) {
-    const target = owner === 'player'
-      ? new THREE.Vector3(
-        THREE.MathUtils.clamp(card.position.x, -5.4, 4.6),
-        .08,
-        // Keep card in the player field strip, nudged slightly toward center for dice roll visibility
-        THREE.MathUtils.clamp(card.position.z, -1.0, 2.6)
-      )
-      : new THREE.Vector3(-.4, .08, -3.2);
-    card.userData.zone = 'attack';
-    card.userData.target.copy(target);
-    card.userData.targetRot = owner === 'player' ? 0 : Math.PI;
-    card.renderOrder = 20;
-    return moveCard(card, target, card.userData.targetRot, 260);
+  function canPlayFromHand(uid) {
+    return Core.legalActions(G).some(a => a.type === 'play' && a.uid === uid);
+  }
+  function flushLog() {
+    if (!G) return;
+    const lines = G.log.slice(logCursor);
+    logCursor = G.log.length;
+    if (!lines.length) return;
+    const recent = G.log.slice(-3);
+    eventLog.innerHTML = recent.map((l, i) => `<div class="${i === recent.length - 1 ? 'latest' : ''}">${escapeHtml(l)}</div>`).join('');
+    const full = $('log-full');
+    lines.forEach(l => { const div = document.createElement('div'); div.textContent = l; full.appendChild(div); });
+    full.scrollTop = full.scrollHeight;
+  }
+  const escapeHtml = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  function setHint(text) {
+    hint.textContent = text || '';
+    hint.classList.toggle('show', !!text);
   }
 
-  async function discardCard(card) {
-    archive.push(card);
-    archiveCount = archive.length;
-    card.visible = true; card.userData.zone = 'archive'; card.renderOrder = 50 + archive.length;
-    const target = new THREE.Vector3(4.45 + Math.min(archive.length, 8) * .006, .12 + archive.length * .012, .12);
-    card.userData.target.copy(target); card.userData.targetRot = .02 * ((archive.length % 3) - 1);
-    updateLabels();
-    await moveCard(card, target, card.userData.targetRot, 720);
-  }
-
-  function updateLabels() {
-    deckLabel.querySelector('b').textContent = deck.length;
-    archiveLabel.querySelector('b').textContent = archiveCount;
-    deckLabel.style.opacity = deck.length ? '1' : '.35';
-    playerTokensLabel.innerHTML = `<span>◆</span>${playerTokens}`;
-    opponentTokensLabel.innerHTML = `<span>◆</span>${opponentTokens}`;
-    const playerGroupCount = battlefield.length + 1;
-    playerGroupsLabel.textContent = `${playerGroupCount} ${playerGroupCount === 1 ? 'group' : 'groups'}`;
-    opponentGroupsLabel.textContent = `${opponentGroupCount} ${opponentGroupCount === 1 ? 'group' : 'groups'}`;
-    const status = state === State.GAME_OVER ? 'GAME OVER'
-      : state === State.CARD_ZOOMED ? 'INSPECTING DOSSIER · TAP TO CLOSE'
-      : state === State.PLAYER_IDLE || state === State.PLAYER_DRAGGING ? 'YOUR TURN · 1 ATTACK'
-        : state === State.PLAYER_DONE ? 'YOUR TURN · ATTACK USED'
-          : [State.ROLLING_PLAYER, State.ROLLING_AI].includes(state) ? 'ROLLING DICE'
-            : [State.REPORTING_PLAYER, State.REPORTING_AI].includes(state) ? 'DICE RESULT'
-          : state === State.RESOLVING_PLAYER ? 'RESOLVING ATTACK'
-            : 'THE CABAL IS ACTING';
-    turnStatus.innerHTML = `<span class="turn-dot"></span>${status}`;
-    finishTurnButton.disabled = ![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state);
-  }
-
-  function drawCard() {
-    if (!deck.length || hand.length >= 10) return;
-    const card = deck.pop();
-    card.visible = true;
-    hand.push(card);
-    card.position.copy(deckTop.position);
-    card.position.y = .4;
-    layoutHand(); updateLabels();
-  }
-
-  function resetGame(cards) {
-    dragging = null; pressedCard = null; hovered = null; cardZoom = 0; stateBeforeZoom = null;
-    hand.splice(0).forEach(c => { c.visible = false; });
-    battlefield.splice(0).forEach(c => { c.visible = false; });
-    archive.splice(0).forEach(c => { c.visible = false; });
-    opponentBattlefield.splice(0).forEach(c => { c.visible = false; });
-    motions.clear();
-    deck = [...cards].sort(() => Math.random() - .5);
-    deck.forEach(c => { c.visible = false; c.userData.zone = 'deck'; });
-    archiveCount = 0; playerTokens = 10; opponentTokens = 10;
-    opponentGroupCount = 1; opponentPower = 2; state = State.SETUP;
-    for (let i = 0; i < 5; i++) drawCard();
-    eventLog.textContent = 'Build your power structure. Drag one dossier into the field to attack it.';
-    transition(State.PLAYER_IDLE);
-  }
-
-  const cardName = card => CARD_DATA[card.userData.index][0];
-  const cardValue = card => CARD_DATA[card.userData.index][2];
-
-  function checkVictory() {
-    if (battlefield.length + 1 >= 7) {
-      eventLog.textContent = 'WORLD CONTROLLED — the Illuminati win.'; transition(State.GAME_OVER);
-    } else if (opponentGroupCount >= 7) {
-      eventLog.textContent = 'THE CABAL CONTROLS THE WORLD. Press R to try again.'; transition(State.GAME_OVER);
-    }
-    updateLabels();
-  }
-
-  async function attackCard(card) {
-    transition(State.ROLLING_PLAYER);
-    playerTokens -= 1;
-    await stageAttackCard(card, 'player');
-    const power = Math.max(2, ...battlefield.map(cardValue));
-    const target = THREE.MathUtils.clamp(7 + power - cardValue(card), 2, 10);
-    const preRolled = [rollD6(), rollD6()];
-    const roll = preRolled[0] + preRolled[1];
-    await rollPhysicalDice('player', preRolled);
-    await reportRoll(roll, 'player');
-    transition(State.RESOLVING_PLAYER);
-    if (roll <= target) {
-      battlefield.push(card);
-      eventLog.textContent = `${cardName(card)} controlled: rolled ${roll}, needed ${target} or less.`;
-      layoutBattlefield();
-      await moveCard(card, card.userData.target, card.userData.targetRot, 620);
-    } else {
-      eventLog.textContent = `${cardName(card)} resisted: rolled ${roll}, needed ${target} or less.`;
-      await discardCard(card);
-    }
-    checkVictory();
-    if (state !== State.GAME_OVER) transition(State.PLAYER_DONE);
-  }
-
-  function finishTurn() {
-    if (![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state)) return;
-    transition(State.AI_THINKING);
-    eventLog.textContent = 'The Cabal considers its target…';
-    setTimeout(runAiTurn, 650);
-  }
-
-  async function runAiTurn() {
-    if (state !== State.AI_THINKING) return;
-    opponentTokens += 2 + Math.floor((opponentGroupCount - 1) / 3);
-    const card = deck.pop();
-    if (card && opponentTokens > 0) {
-      card.visible = true; card.position.copy(deckTop.position); card.position.y = .4;
-      opponentTokens -= 1;
-      const value = cardValue(card);
-      const target = THREE.MathUtils.clamp(7 + opponentPower - value, 2, 10);
-      transition(State.ROLLING_AI);
-      await stageAttackCard(card, 'ai');
-      const preRolled = [rollD6(), rollD6()];
-      const roll = preRolled[0] + preRolled[1];
-      await rollPhysicalDice('ai', preRolled);
-      await reportRoll(roll, 'ai');
-      transition(State.RESOLVING_AI);
-      if (roll <= target) {
-        opponentGroupCount += 1; opponentPower = Math.max(opponentPower, value);
-        eventLog.textContent = `The Cabal controls ${cardName(card)} (rolled ${roll} vs ${target}).`;
-        opponentBattlefield.push(card); layoutOpponentBattlefield();
-        await moveCard(card, card.userData.target, card.userData.targetRot, 720);
-      } else {
-        eventLog.textContent = `The Cabal failed to control ${cardName(card)} (rolled ${roll} vs ${target}).`;
-        await discardCard(card);
+  // ---------- Performing actions ----------
+  // Every engine action, human or AI, goes through here: stage, roll real dice,
+  // apply, then animate the result.
+  async function perform(action, actor) {
+    mode = 'busy'; validTargets = new Set(); refreshHud();
+    const needs = Core.rollsFor(G, action);
+    const ctx = { rolls: [] };
+    if (action.type === 'takeover' || action.type === 'strike') await stageAttack(action);
+    if (action.type === 'play' && !(actor === CPU && Core.def(G, action.uid).type === 'trap')) await stagePlay(action);
+    if (needs) {
+      const values = [];
+      while (values.length < needs) {
+        const n = Math.min(2, needs - values.length);
+        values.push(...await rollPhysicalDice(actor, n));
       }
-    } else eventLog.textContent = 'The Cabal passes.';
-    checkVictory();
-    if (state === State.GAME_OVER) return;
-    playerTokens += 2 + Math.floor(battlefield.length / 3);
-    drawCard(); transition(State.PLAYER_IDLE);
+      ctx.rolls = [...values];
+    }
+    const events = Core.apply(G, action, ctx);
+    flushLog();
+    for (const e of events) {
+      if (e.t === 'roll') {
+        const label = e.kind === 'chaos' ? 'DAMAGE ROLL' : `TAKEOVER · NEED ${e.need} OR LESS`;
+        await showRoll(e.total, label, e.kind === 'chaos' ? null : e.success);
+      }
+      if (e.t === 'trap') { flashBanner(`COUNTERMEASURE — ${Core.def(G, e.uid).name.toUpperCase()}`); revealTrap(e.uid); await wait(900); }
+      if (e.t === 'narrative') flashBanner(e.p === HUMAN ? 'YOU SEIZE THE NARRATIVE' : 'THE ENEMY SEIZES THE NARRATIVE');
+    }
+    layout();
+    await wait(action.type === 'end' ? 250 : 420);
+    mode = G.active === HUMAN && actor === HUMAN ? 'idle' : 'busy';
+    if (G.phase === 'over') return gameOver();
+  }
+  function revealTrap(uid) {
+    const m = meshes.get(uid);
+    if (!m) return;
+    m.userData.faceDown = false;
+    m.userData.target.set(0, 1.6, 0);
+  }
+  function stageAttack(action) {
+    const m = meshes.get(action.uid);
+    if (!m) return wait(0);
+    const goal = action.target === 'player'
+      ? new THREE.Vector3(m.position.x * .5, .9, G.active === HUMAN ? -3.4 : 3.6)
+      : meshes.get(action.target).position.clone().lerp(m.position, .45).setY(.9);
+    return moveCard(m, goal, 0, 260).then(() => wait(80));
+  }
+  function stagePlay(action) {
+    const m = meshes.get(action.uid);
+    if (!m) return wait(0);
+    m.userData.faceDown = false;
+    return moveCard(m, new THREE.Vector3(-.3, 1.1, G.active === HUMAN ? 1.1 : -1.1), 0, 320).then(() => wait(G.active === HUMAN ? 120 : 520));
+  }
+  function moveCard(card, target, rot = 0, duration = 650) {
+    return new Promise(resolve => {
+      card.visible = true;
+      motions.set(card, { from: card.position.clone(), to: target.clone(), fromQuat: card.quaternion.clone(), toQuat: flatQuat(rot, false), start: performance.now(), duration, resolve });
+    });
+  }
+  function flashBanner(text) {
+    const b = $('banner');
+    b.textContent = text;
+    b.classList.remove('show'); void b.offsetWidth; b.classList.add('show');
   }
 
+  // ---------- Turn flow ----------
+  async function finishTurn() {
+    if (G.active !== HUMAN || G.phase !== 'main' || !['idle', 'selected'].includes(mode)) return;
+    clearSelection();
+    await perform({ type: 'end' }, HUMAN);
+    if (G.phase === 'main') runAiTurn();
+  }
+  async function runAiTurn() {
+    mode = 'busy'; refreshHud();
+    await wait(500);
+    let guard = 0;
+    while (G.phase === 'main' && G.active === CPU && guard++ < 60) {
+      const action = AI.chooseAction(G);
+      await perform(action, CPU);
+      if (G.phase !== 'main') return;
+      mode = 'busy';
+      if (action.type === 'end') break;
+      await wait(380);
+    }
+    if (G.phase === 'main') { mode = 'idle'; flashBanner('YOUR TURN'); offerMulligan(); }
+    refreshHud();
+  }
+  function offerMulligan() {
+    const P = G.players[HUMAN];
+    if (P.acted || !G.rules.mulligan || G.active !== HUMAN) return;
+    mode = 'dialog';
+    dialog.innerHTML = `<h2>Opening hand</h2><p>Keep these dossiers, or shuffle them away and draw ${P.hand.length} new ones? You can only do this once, before your first move.</p>
+      <div class="row"><button type="button" id="keep" class="primary">KEEP</button><button type="button" id="redraw">REDRAW</button></div>`;
+    dialog.hidden = false; dialog.classList.add('side');
+    const close = () => { dialog.hidden = true; dialog.classList.remove('side'); mode = 'idle'; refreshHud(); };
+    $('keep').onclick = close;
+    $('redraw').onclick = async () => { dialog.hidden = true; dialog.classList.remove('side'); mode = 'idle'; await perform({ type: 'mulligan' }, HUMAN); };
+  }
+  function gameOver() {
+    mode = 'over';
+    const won = G.winner === HUMAN;
+    const reason = G.winReason === 'domination' ? 'through world domination' : 'by blowing their cover';
+    dialog.innerHTML = `<h2>${won ? 'Victory' : 'Defeat'}</h2><p>${escapeHtml(G.players[G.winner].name)} wins ${reason} on turn ${Math.ceil(G.turn / 2)}.</p><div class="row"><button id="again" type="button">NEW GAME</button></div>`;
+    dialog.hidden = false;
+    $('again').onclick = () => { dialog.hidden = true; showMenu(); };
+    refreshHud();
+  }
+
+  // ---------- Human input ----------
   function setPointer(event) {
     const rect = renderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     raycaster.setFromCamera(pointer, camera);
   }
-
-  function cardHits() {
-    return raycaster.intersectObjects([...hand, ...battlefield].filter(c => c !== dragging), false);
+  function pickCard() {
+    const list = [];
+    meshes.forEach(m => { if (m.visible && m !== dragging && ['hand', 'field', 'trap', 'archive'].includes(m.userData.zone)) list.push(m); });
+    const hit = raycaster.intersectObjects(list, false)[0];
+    return hit ? hit.object : null;
   }
-
-  function setHovered(card) {
-    if (state === State.CARD_ZOOMED) return;
-    if (hovered === card) return;
-    hovered = card;
-    cardZoom = 0;
+  function tablePoint() {
+    const point = new THREE.Vector3();
+    return raycaster.ray.intersectPlane(dragPlane, point) ? point : null;
   }
+  const inField = p => p && p.z > FIELD_ZONE.minZ && p.z < FIELD_ZONE.maxZ && Math.abs(p.x + .3) < FIELD_ZONE.maxX;
+  const inFronts = p => p && p.x < FRONT_ZONE.maxX && p.z > FRONT_ZONE.minZ && p.z < FRONT_ZONE.maxZ;
 
-  function openCardZoom(card) {
-    stateBeforeZoom = state;
-    hovered = card;
-    cardZoom = 0;
-    transition(State.CARD_ZOOMED);
+  function openZoom(mesh) {
+    modeBeforeZoom = mode; zoomed = mesh; hovered = mesh; cardZoom = 0; mode = 'zoom';
     renderer.domElement.style.cursor = 'zoom-out';
+    showInspector(mesh.userData.uid);
+    refreshHud();
+  }
+  function closeZoom() {
+    if (!zoomed) return;
+    zoomed = null; hovered = null; mode = modeBeforeZoom || 'idle'; modeBeforeZoom = null;
+    inspector.hidden = true;
+    renderer.domElement.style.cursor = 'default';
+    refreshHud();
+  }
+  function showInspector(uid) {
+    const d = Core.def(G, uid);
+    const c = G.cards[uid];
+    const status = [];
+    if (G.players[c.ctrl].field.includes(uid) && d.type === 'group') {
+      status.push(`Power ${Core.power(G, uid)} · Resistance ${Core.remaining(G, uid)}/${Core.toughness(G, uid)}`);
+      if (c.exposed) status.push('Exposed: easier to take over, loses Covert, vulnerable to “archive Exposed” effects.');
+      if (c.detained) status.push('Detained: will not ready next turn.');
+      if (c.grant && c.grant.includes('Loyal')) status.push('Turned: changed sides once and is now Loyal.');
+      if (c.ctrl !== c.owner) status.push(`Owned by ${G.players[c.owner].name}.`);
+    }
+    inspector.innerHTML = `<h3 style="--sphere:${SPHERE_COLORS[d.sphere]}">${escapeHtml(d.name)}</h3>
+      <p class="type">${typeLabel(d)} · ${Core.SPHERES[d.sphere].name} · cost ${d.cost}${d.type === 'group' ? ` · ${d.power}/${d.toughness}` : ''}</p>
+      ${(d.keywords || []).map(k => `<p><b>${k}</b> — ${Core.KEYWORD_TEXT[k]}.</p>`).join('')}
+      ${Core.describe(d) ? `<p>${escapeHtml(Core.describe(d))}</p>` : ''}
+      ${status.map(s => `<p class="status">${escapeHtml(s)}</p>`).join('')}
+      <p class="flavor">${escapeHtml(d.flavor || '')}</p>`;
+    inspector.hidden = false;
   }
 
-  function closeCardZoom() {
-    if (state !== State.CARD_ZOOMED) return;
-    const returnState = stateBeforeZoom;
-    stateBeforeZoom = null;
-    hovered = null;
-    cardZoom = 0;
-    transition(returnState);
-    renderer.domElement.style.cursor = 'default';
+  function clearSelection() {
+    selected = null; selectedMode = 'strike'; validTargets = new Set();
+    actionPanel.hidden = true;
+    if (mode === 'selected') mode = 'idle';
+    setHint('');
+  }
+  function selectGroup(uid) {
+    selected = uid; mode = 'selected';
+    if (selectedMode === 'takeover' && !hasTakeovers(uid)) selectedMode = 'strike';
+    computeTargets();
+    renderActionPanel();
+    refreshHud();
+  }
+  function hasTakeovers(uid) { return Core.legalActions(G).some(a => a.type === 'takeover' && a.uid === uid); }
+  function computeTargets() {
+    validTargets = new Set();
+    for (const a of Core.legalActions(G)) {
+      if (a.uid !== selected) continue;
+      if (selectedMode === 'strike' && a.type === 'strike') validTargets.add(a.target);
+      if (selectedMode === 'takeover' && a.type === 'takeover') validTargets.add(a.target);
+    }
+    const walls = Core.firewalls(G, HUMAN).length;
+    setHint(selectedMode === 'strike'
+      ? (walls ? 'A FIREWALL GUARDS THE ENEMY · STRIKE A GLOWING GROUP' : 'CLICK AN ENEMY GROUP OR THE ENEMY PANEL TO STRIKE')
+      : 'CLICK A GLOWING ENEMY GROUP TO ATTEMPT A TAKEOVER');
+  }
+  function renderActionPanel() {
+    const d = Core.def(G, selected);
+    const canTake = hasTakeovers(selected);
+    const P = G.players[HUMAN];
+    const tookOver = P.takeoversThisTurn >= G.rules.takeoversPerTurn;
+    actionPanel.innerHTML = `<div class="title">${escapeHtml(d.name)} <span>${Core.power(G, selected)}/${Core.remaining(G, selected)}</span></div>
+      <div class="row">
+        <button type="button" data-mode="strike" class="${selectedMode === 'strike' ? 'on' : ''}">STRIKE</button>
+        <button type="button" data-mode="takeover" class="${selectedMode === 'takeover' ? 'on' : ''}" ${canTake ? '' : 'disabled'} title="${tookOver ? 'One takeover per turn' : ''}">TAKEOVER</button>
+        ${validTargets.has('player') ? '<button type="button" data-face="1">HIT CONSPIRACY</button>' : ''}
+        <button type="button" data-cancel="1">×</button>
+      </div>`;
+    actionPanel.hidden = false;
+    actionPanel.querySelectorAll('[data-mode]').forEach(b => b.onclick = () => { selectedMode = b.dataset.mode; computeTargets(); renderActionPanel(); refreshHud(); });
+    const face = actionPanel.querySelector('[data-face]');
+    if (face) face.onclick = () => strike('player');
+    actionPanel.querySelector('[data-cancel]').onclick = () => { clearSelection(); refreshHud(); };
+  }
+  async function strike(target) {
+    const uid = selected;
+    clearSelection();
+    await perform({ type: 'strike', uid, target }, HUMAN);
+  }
+  function openTakeoverDialog(target) {
+    const uid = selected;
+    const P = G.players[HUMAN];
+    const bribe = Core.bribe(G, target);
+    let spend = 0;
+    mode = 'dialog';
+    const render = () => {
+      const t = Core.takeoverTarget(G, uid, target, spend);
+      const odds = Math.round(Core.chance(t.need) * 100);
+      const left = P.influence - bribe - spend;
+      dialog.innerHTML = `<h2>Takeover</h2>
+        <p><b>${escapeHtml(Core.def(G, uid).name)}</b> moves on <b>${escapeHtml(Core.def(G, target).name)}</b>.</p>
+        <p class="math">Need 2d6 ≤ <b>${t.need}</b> = ${G.rules.takeoverBase} base + ${Core.power(G, uid)} Power − ${Core.toughness(G, target)} Resistance${t.parts.map(p => ` ${p}`).join('')}${spend ? ` +${Math.floor(spend / G.rules.spendRate)} bought` : ''}${t.raw > t.need ? ' (max 10)' : ''}</p>
+        <div class="odds"><span style="width:${odds}%"></span><em>${odds}%</em></div>
+        <p>Bribe: <b>${bribe}</b> Influence. Spend extra (${G.rules.spendRate} per +1):</p>
+        <div class="row stepper"><button type="button" id="less" ${spend <= 0 ? 'disabled' : ''}>−</button><b>${spend}</b><button type="button" id="more" ${left < G.rules.spendRate || t.raw >= G.rules.takeoverMax ? 'disabled' : ''}>+</button><small>${left} Influence left after</small></div>
+        <p class="small">On a failure you may discard a card to reroll once; otherwise your group is Exposed. 11–12 always fails.</p>
+        <div class="row"><button type="button" id="roll" class="primary" ${t.need < 2 ? 'disabled' : ''}>ROLL THE DICE</button><button type="button" id="cancel">CANCEL</button></div>`;
+      dialog.hidden = false;
+      $('less').onclick = () => { spend = Math.max(0, spend - G.rules.spendRate); render(); };
+      $('more').onclick = () => { spend += G.rules.spendRate; render(); };
+      $('cancel').onclick = () => { dialog.hidden = true; mode = 'selected'; computeTargets(); refreshHud(); };
+      $('roll').onclick = async () => {
+        dialog.hidden = true;
+        clearSelection();
+        await perform({ type: 'takeover', uid, target, spend }, HUMAN);
+        if (G.pending) offerReroll();
+      };
+    };
+    render();
+  }
+  function offerReroll() {
+    mode = 'reroll';
+    const p = G.pending;
+    dialog.innerHTML = `<h2>The takeover failed</h2>
+      <p>${escapeHtml(Core.def(G, p.a).name)} needed ${p.need} or less and rolled ${p.rolls[0] + p.rolls[1]}.</p>
+      <p><b>Plausible deniability:</b> click a card in your hand to discard it and reroll both dice (${Math.round(Core.chance(p.need) * 100)}%).</p>
+      <div class="row"><button type="button" id="accept">ACCEPT FAILURE</button></div>`;
+    dialog.hidden = false;
+    dialog.classList.add('side');
+    setHint('CLICK A HAND CARD TO DISCARD AND REROLL');
+    refreshHud();
+    $('accept').onclick = async () => { dialog.hidden = true; dialog.classList.remove('side'); setHint(''); await perform({ type: 'accept' }, HUMAN); };
+  }
+  async function rerollWith(uid) {
+    dialog.hidden = true; dialog.classList.remove('side'); setHint('');
+    await perform({ type: 'reroll', uid }, HUMAN);
+    if (G.pending) offerReroll();
+  }
+
+  async function dropCard(card, point) {
+    const uid = card.userData.uid;
+    dragging = null; setHint('');
+    if (inFronts(point) && Core.isLegal(G, { type: 'front', uid })) {
+      await perform({ type: 'front', uid }, HUMAN);
+      return;
+    }
+    if (inField(point) && canPlayFromHand(uid)) {
+      const t = Core.cardTargets(G, HUMAN, uid);
+      if (t && t.list.length) {
+        pendingPlay = { uid, list: t.list };
+        validTargets = new Set(t.list);
+        mode = 'target';
+        card.userData.target.set(5.5, 1.2, 1.5); card.userData.faceDown = false;
+        setHint(`CHOOSE A TARGET: ${Core.fxText(t.fx).toUpperCase()} · CLICK EMPTY TABLE TO CANCEL`);
+        refreshHud();
+        return;
+      }
+      await perform({ type: 'play', uid }, HUMAN);
+      return;
+    }
+    mode = 'idle';
+    if (inField(point)) setHint(Core.def(G, uid).cost > G.players[HUMAN].influence ? 'NOT ENOUGH INFLUENCE' : "THAT CARD CAN'T BE PLAYED RIGHT NOW");
+    else if (inFronts(point)) setHint('YOU ALREADY SET UP A FRONT THIS TURN');
+    setTimeout(() => { if (mode === 'idle') setHint(''); }, 1600);
+    layout();
+  }
+  function cancelTargeting() {
+    pendingPlay = null; validTargets = new Set(); mode = 'idle'; setHint(''); layout();
   }
 
   function onPointerDown(event) {
-    if (state === State.CARD_ZOOMED) {
-      closeCardZoom();
+    if (mode === 'zoom') { closeZoom(); return; }
+    if (['menu', 'busy', 'dialog', 'over'].includes(mode)) return;
+    setPointer(event);
+    const hit = pickCard();
+    if (mode === 'target') {
+      if (hit && validTargets.has(hit.userData.uid)) {
+        const { uid } = pendingPlay;
+        const target = hit.userData.uid;
+        pendingPlay = null; validTargets = new Set(); setHint('');
+        perform({ type: 'play', uid, target }, HUMAN);
+      } else cancelTargeting();
       return;
     }
-    if (![State.PLAYER_IDLE, State.PLAYER_DONE].includes(state)) return;
-    setPointer(event);
-    const deckHit = deckTop && raycaster.intersectObject(deckTop, false)[0];
-    if (deckHit) return;
-    const hit = cardHits()[0];
-    if (!hit) return;
-    pressedCard = { card: hit.object, x: event.clientX, y: event.clientY, pointerId: event.pointerId };
+    if (!hit) { if (mode === 'selected') { clearSelection(); refreshHud(); } return; }
+    pressed = { card: hit, x: event.clientX, y: event.clientY };
     renderer.domElement.setPointerCapture?.(event.pointerId);
   }
-
-  function beginDrag(event) {
-    if (!pressedCard || state !== State.PLAYER_IDLE || playerTokens < 1 || !hand.includes(pressedCard.card)) return false;
-    dragging = pressedCard.card;
-    pressedCard = null;
-    setHovered(null);
-    transition(State.PLAYER_DRAGGING);
-    const idx = hand.indexOf(dragging);
-    if (idx >= 0) hand.splice(idx, 1);
-    dragging.userData.zone = 'drag'; dragging.renderOrder = 100;
-    layoutHand();
-    return true;
-  }
-
   function onPointerMove(event) {
     setPointer(event);
-    if (pressedCard) {
-      const distance = Math.hypot(event.clientX - pressedCard.x, event.clientY - pressedCard.y);
-      if (distance < 8 || !beginDrag(event)) return;
+    if (pressed && !dragging) {
+      const distance = Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y);
+      const u = pressed.card.userData;
+      if (distance > 8 && mode === 'idle' && u.zone === 'hand' && G.active === HUMAN && G.phase === 'main') {
+        dragging = pressed.card; pressed = null; hovered = null; mode = 'drag';
+        dragging.renderOrder = 100;
+        layout();
+      }
     }
     if (dragging) {
-      const point = new THREE.Vector3();
-      raycaster.ray.intersectPlane(dragPlane, point);
+      const point = tablePoint();
       if (point) dragging.position.copy(point);
-      dragging.rotation.z *= .78;
-      const valid = point.z > -1.4 && point.z < 2.8 && Math.abs(point.x + .4) < 5.7;
-      hint.textContent = valid ? 'RELEASE TO DEPLOY' : 'MOVE ONTO THE BATTLEFIELD';
-      hint.classList.add('show');
+      const uid = dragging.userData.uid;
+      if (inFronts(point)) setHint(G.players[HUMAN].frontPlayed ? 'ONE FRONT PER TURN' : 'RELEASE TO SET UP A FRONT (+1 INFLUENCE EVERY TURN)');
+      else if (inField(point)) setHint(canPlayFromHand(uid) ? `RELEASE TO PLAY (${Core.def(G, uid).cost} INFLUENCE)` : 'NOT PLAYABLE NOW');
+      else setHint('DROP ON THE FIELD TO PLAY · ON FRONTS (LEFT) FOR INFLUENCE');
       renderer.domElement.style.cursor = 'grabbing';
       return;
     }
-    const hit = cardHits()[0]?.object || null;
-    setHovered(hit);
-    renderer.domElement.style.cursor = hit ? 'grab' : (raycaster.intersectObject(deckTop, false)[0] ? 'pointer' : 'default');
+    if (mode === 'zoom') return;
+    const hit = pickCard();
+    hovered = hit && ['hand', 'field'].includes(hit.userData.zone) && hit.userData.zone !== 'opp-hand' ? hit : null;
+    cardZoom = 0;
+    renderer.domElement.style.cursor = hit ? (mode === 'target' || mode === 'selected' ? (validTargets.has(hit.userData.uid) ? 'crosshair' : 'pointer') : 'pointer') : 'default';
   }
-
-  function onPointerUp(event) {
-    if (pressedCard) {
-      const card = pressedCard.card;
-      pressedCard = null;
-      renderer.domElement.releasePointerCapture?.(event.pointerId);
-      openCardZoom(card);
+  async function onPointerUp(event) {
+    renderer.domElement.releasePointerCapture?.(event.pointerId);
+    if (dragging) {
+      setPointer(event);
+      await dropCard(dragging, tablePoint());
+      renderer.domElement.style.cursor = 'default';
       return;
     }
-    if (!dragging) return;
-    const card = dragging;
-    dragging = null; hint.classList.remove('show');
-    const valid = card.position.z > -1.4 && card.position.z < 2.8 && Math.abs(card.position.x + .4) < 5.7;
-    if (valid) attackCard(card);
-    else { hand.push(card); layoutHand(); transition(State.PLAYER_IDLE); }
-    renderer.domElement.style.cursor = 'default';
-    renderer.domElement.releasePointerCapture?.(event.pointerId);
+    if (!pressed) return;
+    const mesh = pressed.card;
+    pressed = null;
+    const uid = mesh.userData.uid;
+    const c = G.cards[uid];
+    if (mode === 'reroll') {
+      if (mesh.userData.zone === 'hand' && c.ctrl === HUMAN && G.players[HUMAN].hand.includes(uid)) rerollWith(uid);
+      return;
+    }
+    if (mode === 'selected') {
+      if (validTargets.has(uid)) {
+        if (selectedMode === 'strike') strike(uid);
+        else openTakeoverDialog(uid);
+        return;
+      }
+      if (uid !== selected && mesh.userData.zone === 'field' && c.ctrl === HUMAN && Core.canAct(G, uid) && G.active === HUMAN) { selectGroup(uid); return; }
+      clearSelection();
+    }
+    if (mesh.userData.zone === 'field' && c.ctrl === HUMAN && G.active === HUMAN && G.phase === 'main' && Core.canAct(G, uid) && mode === 'idle') {
+      selectGroup(uid);
+      return;
+    }
+    if (mesh.userData.zone === 'trap' && c.ctrl !== HUMAN) return;
+    openZoom(mesh);
   }
 
-  function onPointerCancel(event) {
-    if (pressedCard) pressedCard = null;
-    if (dragging) onPointerUp(event);
-  }
-
+  // ---------- Animation loop ----------
   function animate() {
     requestAnimationFrame(animate);
     const now = performance.now();
@@ -807,123 +1028,152 @@
       const animation = diceAnimation;
       const elapsed = (now - animation.start) / 1000;
       const dt = Math.min(.032, (now - animation.last) / 1000); animation.last = now;
+      const used = dice.slice(0, animation.count);
       if (elapsed < 1.3) {
         animation.accumulator += dt;
         const fixedStep = 1 / 120;
-        while (animation.accumulator >= fixedStep) {
-          simulateDiceStep(animation.bodies, fixedStep);
-          animation.accumulator -= fixedStep;
-        }
-        dice.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
+        while (animation.accumulator >= fixedStep) { simulateDiceStep(animation.bodies, fixedStep); animation.accumulator -= fixedStep; }
+        used.forEach((die, i) => syncDieFromBody(die, animation.bodies[i]));
       } else {
         if (!animation.revealing) {
           animation.revealing = true;
-          animation.values = dice.map(die => topFaceValueFromQuaternion(die.quaternion));
-          animation.from = dice.map(die => ({ position: die.position.clone(), quaternion: die.quaternion.clone() }));
+          animation.values = used.map(die => topFaceValueFromQuaternion(die.quaternion));
+          animation.from = used.map(die => die.position.clone());
+          animation.settleStart = now;
         }
-        if (!animation.settleStart) animation.settleStart = now;
-        const progress = Math.min(1, (now - animation.settleStart) / 620);
+        const progress = Math.min(1, (now - animation.settleStart) / 520);
         const eased = 1 - Math.pow(1 - progress, 3);
-        dice.forEach((die, i) => {
+        used.forEach((die, i) => {
           const half = die.geometry.parameters.width / 2;
-          die.position.lerpVectors(animation.from[i].position, new THREE.Vector3(i ? .34 : -.34, -.09 + half, -.45), eased);
-          die.quaternion.copy(animation.from[i].quaternion);
+          die.position.lerpVectors(animation.from[i], new THREE.Vector3(used.length > 1 ? (i ? .34 : -.34) : 0, -.09 + half, -.15), eased);
         });
-        if (progress === 1) {
-          diceAnimation = null;
-          animation.resolve(animation.values);
-        }
+        if (progress === 1) { diceAnimation = null; animation.resolve(animation.values); }
       }
       diceShadows.forEach((shadow, i) => {
         shadow.position.x = dice[i].position.x; shadow.position.z = dice[i].position.z;
         const height = Math.max(0, dice[i].position.y);
-        const scale = THREE.MathUtils.clamp(1 + height * .12, 1, 1.45);
-        shadow.scale.setScalar(scale);
+        shadow.scale.setScalar(THREE.MathUtils.clamp(1 + height * .12, 1, 1.45));
         shadow.material.opacity = THREE.MathUtils.lerp(.72, .28, THREE.MathUtils.clamp(height / 4, 0, 1));
       });
     }
-    [...hand, ...battlefield, ...archive, ...opponentBattlefield].forEach(card => {
+    meshes.forEach(card => {
+      if (!card.visible) return;
+      const u = card.userData;
+      u.glow.material.opacity = THREE.MathUtils.lerp(u.glow.material.opacity, (u.glowOpacity || 0) * (validTargets.has(u.uid) ? .75 + Math.sin(t * 6) * .25 : 1), .2);
       if (card === dragging || motions.has(card)) return;
       const isHovered = card === hovered;
-      const hoverLift = isHovered ? .9 : 0;
-      const target = card.userData.target.clone(); target.y += hoverLift;
-      if (isHovered) target.z += .3;
-      if (isHovered && cardZoom > 0) {
+      const target = u.target.clone();
+      if (isHovered && !zoomed && u.zone === 'hand') { target.y += .9; target.z -= .5; }
+      else if (isHovered && !zoomed) target.y += .25;
+      if (isHovered && zoomed === card && cardZoom > 0) {
         const distance = 2.18 / (1.2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2));
         camera.getWorldDirection(cameraDirection);
         zoomTarget.copy(camera.position).addScaledVector(cameraDirection, distance);
         target.lerp(zoomTarget, cardZoom);
       }
       card.position.lerp(target, .16);
-
-      if (isHovered) {
+      if (zoomed === card || (isHovered && u.zone === 'hand')) {
         billboardTarget.position.copy(card.position);
         billboardTarget.lookAt(camera.position);
         targetQuaternion.copy(billboardTarget.quaternion);
-      } else {
-        flatCardQuaternion.setFromEuler(new THREE.Euler(-Math.PI / 2, 0, card.userData.targetRot));
-        targetQuaternion.copy(flatCardQuaternion);
-      }
+      } else targetQuaternion.copy(flatQuat(u.rot, u.faceDown));
       card.quaternion.slerp(targetQuaternion, .16);
     });
-    cardZoom = THREE.MathUtils.lerp(cardZoom, state === State.CARD_ZOOMED ? 1 : 0, .18);
-    if (deckTop) deckTop.position.y = .14 + Math.sin(t * 1.4) * .008;
+    cardZoom = THREE.MathUtils.lerp(cardZoom, zoomed ? 1 : 0, .18);
     renderer.render(scene, camera);
+  }
+
+  // ---------- Menu / new game ----------
+  function showMenu() {
+    mode = 'menu';
+    menu.innerHTML = `<h1>THE HIDDEN ARCHIVE</h1><p class="sub">Choose the conspiracy you will lead.</p>
+      <div class="factions">${Object.entries(Core.SPHERES).map(([k, s]) => `
+        <button type="button" class="faction" data-sphere="${k}" style="--sphere:${SPHERE_COLORS[k]}">
+          <strong>${s.faction}</strong><em>${s.name}</em><span>${SPHERE_BLURB[k]}</span></button>`).join('')}</div>
+      <p class="sub small">New here? Press <b>?</b> during play for the field manual.</p>`;
+    menu.hidden = false;
+    menu.querySelectorAll('.faction').forEach(b => b.onclick = () => { menu.hidden = true; newGame(b.dataset.sphere); });
+  }
+  function newGame(sphere) {
+    humanSphere = sphere;
+    const others = Object.keys(Core.SPHERES).filter(s => s !== sphere);
+    const enemy = others[Math.floor(Math.random() * others.length)];
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    const first = Math.random() < .5 ? HUMAN : CPU;
+    meshes.forEach(m => scene.remove(m));
+    meshes.clear(); motions.clear();
+    clearSelection(); pendingPlay = null; zoomed = null; hovered = null; dragging = null; inspector.hidden = true; dialog.hidden = true;
+    G = Core.createGame({
+      seed, first,
+      spheres: [sphere, enemy],
+      names: [Core.SPHERES[sphere].faction, Core.SPHERES[enemy].faction],
+      decks: [Core.buildDeck(sphere, seed + 1), Core.buildDeck(enemy, seed + 2)]
+    });
+    Object.keys(G.cards).forEach(uid => createCardMesh(+uid));
+    logCursor = 0; $('log-full').innerHTML = '';
+    eventLog.innerHTML = '';
+    flushLog();
+    layout();
+    if (first === CPU) { flashBanner(`${G.players[CPU].name.toUpperCase()} MOVES FIRST`); runAiTurn(); }
+    else { mode = 'idle'; flashBanner('YOU MOVE FIRST'); refreshHud(); offerMulligan(); }
   }
 
   async function init() {
     try {
       await document.fonts.ready;
+      await Promise.all(['30px CrimsonSemi', 'italic 25px CrimsonItalic', '30px Crimson', '30px Cardo', '20px Cinzel'].map(f => document.fonts.load(f)));
       const [tableTex, atlasTex, chromeTex, backTex, diceTex] = await Promise.all([
         loadTexture('./assets/table.webp'), loadTexture('./assets/cards.webp?v=20260716-1'),
         loadTexture('./assets/card-front-chrome.webp?v=20260712-2'), loadTexture('./assets/card-back.webp?v=20260712-2'),
         loadTexture('./assets/dice-occult-resin.webp')
       ]);
-      makeTable(tableTex); makeDeck(backTex); makeDice(diceTex);
-      const atlas = atlasTex.image, chrome = chromeTex.image;
-      const textures = CARD_DATA.map((_, i) => makeCardTexture(i, atlas, chrome));
-      const cards = textures.map((texture, i) => createCard(i, texture));
-      resetGame(cards);
+      atlasImage = atlasTex.image; chromeImage = chromeTex.image; backTexture = backTex;
+      makeTable(tableTex); makeDeckStacks(); makeDice(diceTex);
       loading.classList.add('done');
+      showMenu();
     } catch (error) {
       console.error(error);
       loading.classList.add('failed');
-      loadingMessage.innerHTML = `<strong>THE ARCHIVE FAILED TO OPEN</strong><small>${String(error?.message || error)}<br>Make sure the PNG assets are beside index.html.</small>`;
+      loadingMessage.innerHTML = `<strong>THE ARCHIVE FAILED TO OPEN</strong><small>${escapeHtml(String(error?.message || error))}<br>Make sure the assets folder is beside index.html.</small>`;
     }
   }
 
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
   renderer.domElement.addEventListener('pointermove', onPointerMove);
   renderer.domElement.addEventListener('pointerup', onPointerUp);
-  renderer.domElement.addEventListener('pointercancel', onPointerCancel);
-  renderer.domElement.addEventListener('pointerleave', () => {
-    if (!dragging && !pressedCard) setHovered(null);
-  });
+  renderer.domElement.addEventListener('pointercancel', event => { pressed = null; if (dragging) onPointerUp(event); });
+  renderer.domElement.addEventListener('pointerleave', () => { if (!dragging && !pressed) hovered = null; });
+  $('opponent-panel').addEventListener('click', () => { if (mode === 'selected' && validTargets.has('player')) strike('player'); });
   document.addEventListener('pointerdown', event => {
-    if (state !== State.CARD_ZOOMED || event.target === renderer.domElement) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
-    suppressNextClick = true;
-    closeCardZoom();
+    if (mode !== 'zoom' || event.target === renderer.domElement) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    suppressNextClick = true; closeZoom();
   }, true);
   document.addEventListener('click', event => {
     if (!suppressNextClick) return;
-    suppressNextClick = false;
-    event.preventDefault();
-    event.stopImmediatePropagation();
+    suppressNextClick = false; event.preventDefault(); event.stopImmediatePropagation();
   }, true);
   addEventListener('keydown', event => {
-    if (state === State.CARD_ZOOMED) return;
-    if (event.key.toLowerCase() === 'r') location.reload();
+    if (mode === 'zoom') { if (event.key === 'Escape') closeZoom(); return; }
+    if (event.key === 'Escape') { if (mode === 'target') cancelTargeting(); else if (mode === 'selected') { clearSelection(); refreshHud(); } }
+    if (event.key.toLowerCase() === 'r' && !['menu', 'busy'].includes(mode) && event.target === document.body) showMenu();
+    if (event.key.toLowerCase() === 'l') $('log-full').classList.toggle('open');
   });
-  addEventListener('resize', () => {
-    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-  });
-  const help = document.getElementById('help');
-  document.getElementById('settings').onclick = () => { help.hidden = !help.hidden; };
-  document.getElementById('close-help').onclick = () => { help.hidden = true; };
+  addEventListener('resize', fitCamera);
+  const help = $('help');
+  $('settings').onclick = () => { help.hidden = !help.hidden; };
+  $('close-help').onclick = () => { help.hidden = true; };
+  $('log-toggle').onclick = () => $('log-full').classList.toggle('open');
   finishTurnButton.onclick = finishTurn;
+
+  // Debug/automation hook for headless checks.
+  window.__archive = {
+    screenOf(uid) {
+      const m = meshes.get(uid); if (!m) return null;
+      const v = m.position.clone().project(camera);
+      return { x: (v.x + 1) / 2 * innerWidth, y: (1 - v.y) / 2 * innerHeight };
+    },
+    get state() { return G; }, get mode() { return mode; }, newGame, perform, Core, finishTurn, selectGroup, openTakeoverDialog, offerReroll };
 
   init(); animate();
 })();
