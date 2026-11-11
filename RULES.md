@@ -132,6 +132,8 @@ In the browser, takeovers and "roll a die" effects throw physical dice across th
 
 ## Design notes: where the ideas come from
 
+Full references and links: [INSPIRATIONS.md](./INSPIRATIONS.md).
+
 | Idea | Taken from | Why it's here |
 |---|---|---|
 | Takeover: 2d6 ≤ Power − Resistance, with bribes | *Illuminati* (1982) and *INWO* (1994) | The signature conspiracy moment: you steal a group instead of killing it. |

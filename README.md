@@ -21,6 +21,7 @@ Then open `http://localhost:8080`. Opening `index.html` directly will not work, 
 
 - [RULES.md](./RULES.md): the complete rules, plus where each mechanic was borrowed from.
 - [PLAYTEST.md](./PLAYTEST.md): research, simulation results and every rules iteration.
+- [INSPIRATIONS.md](./INSPIRATIONS.md): the games we borrowed from, what we took from each, and links.
 
 ## Controls
 
