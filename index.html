@@ -4,44 +4,55 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0b0d0c">
-  <meta name="description" content="The Hidden Archive — a browser-based Three.js card game.">
+  <meta name="description" content="The Hidden Archive — a conspiracy trading card game played on a Three.js table.">
   <title>The Hidden Archive</title>
-  <link rel="stylesheet" href="./styles.css">
-  <link rel="stylesheet" href="./error.css">
+  <link rel="stylesheet" href="./styles.css?v=20261111">
+  <link rel="stylesheet" href="./error.css?v=20261111">
 </head>
 <body>
   <main id="game" aria-label="The Hidden Archive card table"></main>
   <header class="topbar">
     <div class="brand"><span class="sigil">◈</span><span>THE HIDDEN ARCHIVE</span></div>
-    <div id="turn-status" class="turn"><span class="turn-dot"></span>YOUR TURN · 1 ATTACK</div>
+    <div id="turn-status" class="turn"><span class="turn-dot"></span>CHOOSE A CONSPIRACY</div>
+    <button id="log-toggle" class="icon-button log-button" type="button" aria-label="Toggle game log">≡</button>
     <button id="settings" class="icon-button" type="button" aria-label="Toggle help">?</button>
   </header>
-  <section class="opponent" aria-label="Opponent status">
-    <div class="portrait">?</div>
-    <div><strong>THE CABAL</strong><small id="opponent-groups">1 group</small></div>
-    <div id="opponent-tokens" class="life"><span>◆</span>10</div>
+  <section id="opponent-panel" class="opponent" aria-label="Opponent status">
+    <div class="portrait">◎</div>
+    <div><strong>THE ENEMY</strong><small>—</small><span class="narrative" hidden>◉ THE NARRATIVE</span></div>
+    <div class="secrecy" title="Secrecy — reduce it to 0 to win"><span>◆</span>20</div>
   </section>
-  <section class="player" aria-label="Player status">
-    <div class="portrait active">I</div>
-    <div><strong>THE ILLUMINATI</strong><small id="player-groups">1 group</small></div>
-    <div id="player-tokens" class="life"><span>◆</span>10</div>
+  <section id="player-panel" class="player" aria-label="Player status">
+    <div class="portrait">◈</div>
+    <div><strong>YOU</strong><small>—</small><span class="narrative" hidden>◉ THE NARRATIVE</span></div>
+    <div class="secrecy" title="Secrecy — if it reaches 0 you lose"><span>◆</span>20</div>
   </section>
-  <div id="deck-label" class="pile-label">DOSSIER <b>58</b><small>CLICK TO DRAW</small></div>
-  <div id="grave-label" class="pile-label muted" style="top:50%;right:150px">ARCHIVE <b>0</b></div>
-  <div id="hint" class="hint">DRAG A CARD ONTO THE BATTLEFIELD</div>
-  <button id="finish-turn" class="finish-turn" type="button">FINISH TURN</button>
-  <section id="event-log" class="event-log" aria-live="polite">Build your power structure. Drag one dossier into the field to attack it.</section>
+  <div id="influence" class="influence">INFLUENCE <b>0</b></div>
+  <div id="hint" class="hint"></div>
+  <div id="banner" class="banner"></div>
+  <button id="finish-turn" class="finish-turn" type="button">END TURN</button>
+  <section id="event-log" class="event-log" aria-live="polite"></section>
+  <section id="log-full" class="log-full" aria-label="Game log"></section>
+  <div id="action-panel" class="action-panel" hidden></div>
+  <div id="dialog" class="dialog" hidden></div>
+  <aside id="inspector" class="inspector" hidden></aside>
   <div id="roll-result" class="roll-result" aria-live="assertive"><small>DICE TOTAL</small><strong>7</strong></div>
+  <div id="menu" class="menu" hidden></div>
   <aside id="help" class="help" hidden>
     <button id="close-help" type="button" aria-label="Close help">×</button>
     <h2>Field Manual</h2>
-    <p>Each turn you collect Influence, draw a dossier, and may make one control attempt. Drag a dossier onto the highlighted field; an Influence token is spent and two dice are rolled.</p>
-    <p>Click or tap a card to inspect it. Click or tap again to return to the table; all other controls are locked while inspecting.</p>
-    <p>Lower-value groups are easier to control. Control 7 groups before the Cabal. Click Finish Turn when ready. Press <kbd>R</kbd> to reset.</p>
+    <p><b>Win</b> by reducing the enemy's <b>Secrecy</b> from 20 to 0, or by starting your turn with <b>7 groups</b> in play.</p>
+    <p><b>Fronts:</b> once per turn drag any card onto your Fronts pile (left). Each Front gives 1 Influence every turn.</p>
+    <p><b>Play</b> a card by dragging it onto the field and paying its cost in Influence.</p>
+    <p><b>Act:</b> click one of your ready groups (green glow), then <b>Strike</b> an enemy group or the enemy conspiracy, or attempt a <b>Takeover</b>: pay the target's cost as a bribe and roll 2d6 ≤ 5 + your Power − its Resistance. Spend 2 more Influence for each +1.</p>
+    <p><b>The Narrative:</b> its holder draws an extra card each turn. Strike the holder's conspiracy to seize it.</p>
+    <p><b>Countermeasures</b> are set face-down and spring on the enemy's move. Press <kbd>L</kbd> for the log, <kbd>R</kbd> for a new game. Full rules: RULES.md.</p>
   </aside>
   <div id="loading" class="loading"><span></span><div id="loading-message">OPENING THE ARCHIVE…</div></div>
   <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
-  <script src="./cards.js"></script>
-  <script src="./game.js?v=20260712-2"></script>
+  <script src="./cards.js?v=20261111"></script>
+  <script src="./core.js?v=20261111"></script>
+  <script src="./ai.js?v=20261111"></script>
+  <script src="./game.js?v=20261111"></script>
 </body>
 </html>
